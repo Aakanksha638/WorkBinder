@@ -63,7 +63,7 @@ pub async fn ask_ai(query_text: &str) -> Result<String, String> {
         ],
     };
 
-    println!("  🌐 Sending request to Groq...");
+    println!(" Sending request to Groq...");
 
     // Only the URL is different from OpenAI
     let response = client
@@ -89,7 +89,7 @@ pub async fn ask_ai(query_text: &str) -> Result<String, String> {
         .map(|choice| choice.message.content.clone())
         .ok_or_else(|| "No response from AI".to_string())?;
 
-    println!("  ✅ Got response from Groq!");
+    println!(" Got response from Groq!");
 
     Ok(answer)
 }
