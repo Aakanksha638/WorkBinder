@@ -7,6 +7,7 @@ mod events;
 mod mork;
 mod storage;
 mod model;
+mod embeddings;
 
 use events::Event;
 use storage::StorageLayer;

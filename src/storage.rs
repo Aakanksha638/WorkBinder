@@ -1,219 +1,229 @@
 // storage.rs
 // The brain of WorkBindr
-// It receives events, understands them, and routes them correctly
-//
-// Think of this like a smart post office manager who:
-// - Receives every piece of mail
-// - Reads what type it is
-// - Stamps it with time
-// - Sends it to the right place
-// - Keeps a record of everything
+// Receives events, routes them to MORK
+// Also stores documents with embeddings for RAG search
 
-// We're bringing in our Event enum from events.rs
-// "use" = "I want to use this thing from another file"
 use crate::events::Event;
-
-// We're bringing in MORK so we can record events
 use crate::mork::Mork;
 
-// std::time gives us the computer's clock
+use std::sync::Mutex;
+use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// We need serde for saving/loading JSON files
+use serde::{Serialize, Deserialize};
+
 // ─────────────────────────────────────────────
-// The StorageLayer struct
+// Document Store — Stores Documents + Embeddings
 // ─────────────────────────────────────────────
-// A struct is like a form with fields
-// This one has one field: a MORK instance
-// Every StorageLayer HAS a MORK attached to it
-pub struct StorageLayer {
-    // This is our MORK black box
-    // "mork" is the field name
-    // "Mork" is the type (from mork.rs)
-    mork: Mork,
+
+// One stored document with its embedding
+// Serialize = can be saved to JSON file
+// Deserialize = can be loaded from JSON file
+// Clone = can be copied
+#[derive(Serialize, Deserialize, Clone)]
+pub struct StoredDocument {
+    pub doc_id: String,
+    pub title: String,
+    pub content: String,
+    pub embedding: Vec<f32>,  // the meaning-numbers from Jina
+}
+
+// Holds ALL documents in memory AND on disk
+pub struct DocumentStore {
+    pub docs: Mutex<Vec<StoredDocument>>,
+    file_path: String,
+}
+
+impl DocumentStore {
+
+    // Create a new DocumentStore
+    // Automatically loads any previously saved documents from disk
+    pub fn new(file_path: &str) -> Self {
+        println!("📂 Loading document store from disk...");
+
+        // Try to load existing documents
+        let existing_docs = match Self::load_from_disk(file_path) {
+            Ok(docs) => {
+                println!("  ✅ Loaded {} documents from disk", docs.len());
+                docs
+            }
+            Err(_) => {
+                println!("  ℹ️  No existing documents found, starting fresh");
+                Vec::new()
+            }
+        };
+
+        DocumentStore {
+            docs: Mutex::new(existing_docs),
+            file_path: file_path.to_string(),
+        }
+    }
+
+    // Load documents from JSON file on disk
+    fn load_from_disk(file_path: &str) -> Result<Vec<StoredDocument>, String> {
+        let json = fs::read_to_string(file_path)
+            .map_err(|e| format!("Failed to read file: {}", e))?;
+
+        let docs: Vec<StoredDocument> = serde_json::from_str(&json)
+            .map_err(|e| format!("Failed to parse document store: {}", e))?;
+
+        Ok(docs)
+    }
+
+    // Save all documents to JSON file on disk
+    // Called every time a new document is added
+    pub fn save_to_disk(&self) -> Result<(), String> {
+        let docs = self.docs.lock().unwrap();
+
+        let json = serde_json::to_string_pretty(&*docs)
+            .map_err(|e| format!("Failed to serialize: {}", e))?;
+
+        fs::write(&self.file_path, json)
+            .map_err(|e| format!("Failed to write file: {}", e))?;
+
+        println!("  💾 Saved {} documents to disk", docs.len());
+        Ok(())
+    }
+
+    // Add a new document and save to disk immediately
+    pub fn add_document(&self, doc: StoredDocument) -> Result<(), String> {
+        {
+            let mut docs = self.docs.lock().unwrap();
+            docs.push(doc);
+        }
+        self.save_to_disk()
+    }
+
+    // Get all documents for RAG searching
+    pub fn get_all(&self) -> Vec<StoredDocument> {
+        self.docs.lock().unwrap().clone()
+    }
 }
 
 // ─────────────────────────────────────────────
-// Functions that belong to StorageLayer
+// Storage Layer — The Main Brain
 // ─────────────────────────────────────────────
-// "impl" = implementation
-// Everything inside here is a function of StorageLayer
+
+pub struct StorageLayer {
+    mork: Mork,
+    pub doc_store: DocumentStore,
+}
+
 impl StorageLayer {
 
-    // ── new() ────────────────────────────────
-    // Creates a new StorageLayer
-    // Like setting up a new post office with a fresh black box
-    // "log_path" = where to store the MORK log file
+    // Create a new StorageLayer with MORK and DocumentStore
     pub fn new(log_path: &str) -> Self {
-        // Print a message so we can see it starting up
-        println!("Storage Layer initializing...");
-        
-        // Create a new MORK instance at the given path
+        println!("🗄️  Storage Layer initializing...");
+
         let mork = Mork::new(log_path);
-        
-        println!("Storage Layer ready!");
-        
-        // Return a StorageLayer with this MORK attached
-        // In Rust if the last line has no semicolon
-        // it automatically gets returned
-        StorageLayer { mork }
+
+        // Documents saved in a separate JSON file
+        let doc_store = DocumentStore::new("workbinder_documents.json");
+
+        println!("✅ Storage Layer ready!\n");
+
+        StorageLayer { mork, doc_store }
     }
 
-    // ── get_timestamp() ──────────────────────
-    // Private helper function
-    // Gives us the current time as a number (milliseconds)
-    // "private" means only THIS file can use it
-    // (no "pub" in front = private)
+    // Helper: get current timestamp in milliseconds
     fn get_timestamp() -> u128 {
-        // u128 = a very large positive number
-        // big enough to hold milliseconds since 1970
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
             .as_millis()
     }
 
-    // ── record_event() ───────────────────────
-    // THE most important function in this file
-    // This is called every time ANYTHING happens in WorkBindr
-    //
-    // "&self" = this function belongs to StorageLayer
-    //           and can read its data (the mork field)
-    // "event" = the Event we want to record
-    //           it's our Event enum from events.rs
-    // "-> Result<(), String>" = either works fine ()
-    //                           or returns an error message String
+    // ── record_event ─────────────────────────
+    // THE most important function
+    // Called every time ANYTHING happens in WorkBindr
     pub fn record_event(&self, event: Event) -> Result<(), String> {
-        
-        // Get the current timestamp
-        // We'll attach this to every event
+
         let timestamp = Self::get_timestamp();
-        
-        // "match" is like a smart switch statement
-        // It looks at what TYPE of event came in
-        // and runs different code for each type
-        // Think of it like a sorting machine at the post office
+
         match event {
 
-            // ── Handle UserInput ──────────────
-            // Someone asked the AI a question
+            // ── UserInput ────────────────────
             Event::UserInput { query_id, query_text } => {
-                
-                println!("Processing UserInput event...");
-                
-                // Build the log entry as a formatted string
-                // This is what gets written to the MORK file
+                println!("📨 Processing UserInput event...");
+
                 let log_entry = format!(
                     "[{}] EVENT: UserInput | query_id: {} | text: {}",
-                    timestamp,  // when it happened
-                    query_id,   // unique ID for this query
-                    query_text  // what the user asked
+                    timestamp,
+                    query_id,
+                    query_text
                 );
-                
-                // Write to MORK
-                // map_err converts the io::Error into a String error
-                // so our function can return it cleanly
+
                 self.mork.append(&log_entry)
                     .map_err(|e| format!("MORK write failed: {}", e))?;
-                
-                println!("UserInput recorded in MORK");
-                
-                // In the future this is where we'll send
-                // the query to the AI model
-                // For now we just print a placeholder
-                println!(" [Placeholder] Sending to AI model...");
-                println!(" [Placeholder] AI would respond here");
+
+                println!("  ✅ UserInput recorded in MORK");
             }
 
-            // ── Handle DocumentAdded ──────────
-            // Someone uploaded a document
+            // ── DocumentAdded ────────────────
             Event::DocumentAdded { doc_id, content } => {
-                
-                println!("Processing DocumentAdded event...");
-                
+                println!("📄 Processing DocumentAdded event...");
+
                 let log_entry = format!(
                     "[{}] EVENT: DocumentAdded | doc_id: {} | content: {}",
                     timestamp,
                     doc_id,
                     content
                 );
-                
+
                 self.mork.append(&log_entry)
                     .map_err(|e| format!("MORK write failed: {}", e))?;
-                
-                println!("Document recorded in MORK");
-                
-                // In the future this is where we'll
-                // create embeddings for RAG
-                // (embeddings = converting text to numbers
-                //  so the AI can search it)
-                println!("Creating embeddings for RAG...");
+
+                println!("  ✅ Document recorded in MORK");
             }
 
-            // ── Handle Tombstone ─────────────
-            // Someone deleted a document
-            // Remember: we never actually delete
-            // We just record THAT it was deleted
+            // ── Tombstone ────────────────────
             Event::Tombstone { doc_id } => {
-                
-                println!("Processing Tombstone event...");
-                
+                println!("🪦  Processing Tombstone event...");
+
                 let log_entry = format!(
                     "[{}] EVENT: Tombstone | doc_id: {} | status: DELETED",
                     timestamp,
                     doc_id
                 );
-                
+
                 self.mork.append(&log_entry)
                     .map_err(|e| format!("MORK write failed: {}", e))?;
-                
-                println!("  Deletion recorded in MORK");
-                println!("  Note: Document history preserved forever");
+
+                println!("  ✅ Deletion recorded in MORK");
+                println!("  ℹ️  Document history preserved forever");
             }
 
-            // ── Handle QueryResponse ──────────
-            // The AI sent back an answer
+            // ── QueryResponse ────────────────
             Event::QueryResponse { query_id, response_text } => {
-                
-                println!("Processing QueryResponse event...");
-                
+                println!("💬 Processing QueryResponse event...");
+
                 let log_entry = format!(
                     "[{}] EVENT: QueryResponse | query_id: {} | response: {}",
                     timestamp,
                     query_id,
                     response_text
                 );
-                
+
                 self.mork.append(&log_entry)
                     .map_err(|e| format!("MORK write failed: {}", e))?;
-                
-                println!(" AI Response recorded in MORK");
+
+                println!("  ✅ AI Response recorded in MORK");
             }
         }
 
-        // If we made it here everything worked fine
-        // Ok(()) means "success, nothing to return"
         Ok(())
     }
 
-    // ── get_history() ────────────────────────
-    // Returns ALL events ever recorded
-    // Like asking the post office for every letter ever sent
+    // ── get_history ──────────────────────────
+    // Returns ALL events ever recorded in MORK
     pub fn get_history(&self) -> Vec<String> {
-        
-        // read_all() returns a Result
-        // unwrap_or_default() means:
-        // "if it works give me the data,
-        //  if it fails give me an empty list"
-        self.mork.read_all()
-            .unwrap_or_default()
+        self.mork.read_all().unwrap_or_default()
     }
 
-    // ── get_event_count() ────────────────────
-    // Returns how many events are in MORK
-    // Like asking "how many letters have we ever processed?"
+    // ── get_event_count ──────────────────────
+    // Returns total number of events in MORK
     pub fn get_event_count(&self) -> usize {
-        // usize = a positive whole number
-        // used for counts and lengths in Rust
         self.get_history().len()
     }
 }
