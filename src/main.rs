@@ -1,5 +1,5 @@
 // main.rs
-// Now with document upload, delete, and history endpoints
+// Complete WorkBindr backend with RAG
 
 #[macro_use] extern crate rocket;
 
@@ -10,13 +10,10 @@ mod model;
 mod embeddings;
 
 use events::Event;
-use storage::StorageLayer;
-use model::ask_ai;
-
+use storage::{StorageLayer, StoredDocument};
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
 use rocket::State;
-
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ─────────────────────────────────────────────
@@ -35,14 +32,12 @@ fn generate_id() -> String {
 // Request and Response Shapes
 // ─────────────────────────────────────────────
 
-// Shape of incoming /query request
 #[derive(Deserialize)]
 #[serde(crate = "rocket::serde")]
 struct QueryRequest {
     query_text: String,
 }
 
-// Shape of response we send back from /query
 #[derive(Serialize)]
 #[serde(crate = "rocket::serde")]
 struct QueryResponseBody {
@@ -50,9 +45,6 @@ struct QueryResponseBody {
     message: String,
 }
 
-// Shape of incoming /add_document request
-// "content" = the actual text of the document
-// "title" = a human readable name for it
 #[derive(Deserialize)]
 #[serde(crate = "rocket::serde")]
 struct AddDocumentRequest {
@@ -60,7 +52,6 @@ struct AddDocumentRequest {
     content: String,
 }
 
-// Shape of response from /add_document
 #[derive(Serialize)]
 #[serde(crate = "rocket::serde")]
 struct AddDocumentResponse {
@@ -68,15 +59,12 @@ struct AddDocumentResponse {
     message: String,
 }
 
-// Shape of incoming /delete_document request
-// We only need the doc_id to delete something
 #[derive(Deserialize)]
 #[serde(crate = "rocket::serde")]
 struct DeleteDocumentRequest {
     doc_id: String,
 }
 
-// Shape of response from /delete_document
 #[derive(Serialize)]
 #[serde(crate = "rocket::serde")]
 struct DeleteDocumentResponse {
@@ -84,8 +72,6 @@ struct DeleteDocumentResponse {
     message: String,
 }
 
-// Shape of response from /history
-// Just a list of all events as strings
 #[derive(Serialize)]
 #[serde(crate = "rocket::serde")]
 struct HistoryResponse {
@@ -100,17 +86,17 @@ struct HistoryResponse {
 #[get("/")]
 fn index() -> &'static str {
     "WorkBindr API is alive! 🚀
-    
+
 Available endpoints:
-    GET  /              - This page
-    POST /query         - Ask the AI a question
-    POST /add_document  - Upload a document
-    POST /delete_document - Delete a document
-    GET  /history       - See all events ever recorded"
+    GET  /                  - This page
+    POST /query             - Ask the AI (with RAG)
+    POST /add_document      - Upload a document
+    POST /delete_document   - Delete a document
+    GET  /history           - See all MORK events"
 }
 
 // ─────────────────────────────────────────────
-// Endpoint 2: /query — Ask the AI
+// Endpoint 2: /query — Ask AI with RAG
 // ─────────────────────────────────────────────
 
 #[post("/query", format = "json", data = "<request>")]
@@ -121,15 +107,69 @@ async fn query(
 
     let query_id = generate_id();
     println!("\n📨 New /query request received!");
+    println!("  Question: {}", request.query_text);
 
-    // Record the question
+    // Step 1 — Record user question in MORK
     storage.inner().record_event(Event::UserInput {
         query_id: query_id.clone(),
         query_text: request.query_text.clone(),
     }).expect("Failed to record UserInput");
 
-    // Ask the AI
-    let ai_answer = match ask_ai(&request.query_text).await {
+    // Step 2 — Convert question to embedding for searching
+    let query_embedding = match embeddings::get_embedding(
+        &request.query_text,
+        "search_query"
+    ).await {
+        Ok(emb) => emb,
+        Err(e) => {
+            println!("  ⚠️ Embedding failed: {}", e);
+            vec![]
+        }
+    };
+
+    // Step 3 — Search documents for best match
+    let best_match = if !query_embedding.is_empty() {
+        let docs = storage.inner().doc_store.get_all();
+
+        docs.iter()
+            .filter(|doc| !doc.embedding.is_empty())
+            .map(|doc| {
+                let similarity = embeddings::cosine_similarity(
+                    &query_embedding,
+                    &doc.embedding
+                );
+                (doc.title.clone(), doc.content.clone(), similarity)
+            })
+            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
+    } else {
+        None
+    };
+
+    // Step 4 — Build prompt with or without document context
+    let final_prompt = match &best_match {
+        Some((title, content, similarity)) if *similarity > 0.3 => {
+            println!(
+                "  📄 Found relevant document: '{}' (similarity: {:.2})",
+                title, similarity
+            );
+            format!(
+                "You are a helpful business assistant for WorkBindr.\n\
+                Use this document to answer the question:\n\n\
+                Document Title: {}\n\
+                Document Content: {}\n\n\
+                Question: {}\n\n\
+                Answer based on the document above.",
+                title, content, request.query_text
+            )
+        }
+        _ => {
+            println!("  ℹ️  No relevant document found, using general knowledge");
+            request.query_text.clone()
+        }
+    };
+
+    // Step 5 — Ask the AI
+    let ai_answer = match model::ask_ai(&final_prompt).await {
         Ok(answer) => answer,
         Err(error) => {
             println!("  ❌ AI Error: {}", error);
@@ -137,11 +177,13 @@ async fn query(
         }
     };
 
-    // Record the AI's answer
+    // Step 6 — Record AI response in MORK
     storage.inner().record_event(Event::QueryResponse {
         query_id: query_id.clone(),
         response_text: ai_answer.clone(),
     }).expect("Failed to record QueryResponse");
+
+    println!("  ✅ Response sent!");
 
     Json(QueryResponseBody {
         query_id,
@@ -150,43 +192,65 @@ async fn query(
 }
 
 // ─────────────────────────────────────────────
-// Endpoint 3: /add_document — Upload a Document
+// Endpoint 3: /add_document
 // ─────────────────────────────────────────────
 
 #[post("/add_document", format = "json", data = "<request>")]
-fn add_document(
+async fn add_document(
     request: Json<AddDocumentRequest>,
     storage: &State<StorageLayer>,
 ) -> Json<AddDocumentResponse> {
 
-    // Generate a unique ID for this document
     let doc_id = generate_id();
 
     println!("\n📄 New /add_document request received!");
     println!("  Title: {}", request.title);
 
-    // Combine title and content so we store both together
-    // format! builds a String with variables inserted
+    // Record in MORK (permanent history)
     let full_content = format!(
         "TITLE: {} | CONTENT: {}",
         request.title,
         request.content
     );
 
-    // Record the document in MORK permanently
     storage.inner().record_event(Event::DocumentAdded {
         doc_id: doc_id.clone(),
         content: full_content,
     }).expect("Failed to record DocumentAdded");
 
+    // Convert document to embedding
+    println!("  🔢 Generating embedding for RAG...");
+
+    let embedding = match embeddings::get_embedding(
+        &request.content,
+        "search_document"
+    ).await {
+        Ok(emb) => {
+            println!("  ✅ Embedding generated successfully!");
+            emb
+        }
+        Err(e) => {
+            println!("  ⚠️ Embedding failed: {} — document saved without RAG", e);
+            vec![]
+        }
+    };
+
+    // Save document + embedding to disk
+    storage.inner().doc_store.add_document(StoredDocument {
+        doc_id: doc_id.clone(),
+        title: request.title.clone(),
+        content: request.content.clone(),
+        embedding,
+    }).expect("Failed to save document");
+
     println!("  ✅ Document saved with ID: {}", doc_id);
 
-    // Send back confirmation + the new doc_id
-    // The user needs this doc_id to delete the document later
     Json(AddDocumentResponse {
         doc_id: doc_id.clone(),
         message: format!(
-            "Document '{}' saved successfully! Your doc_id is: {}. Keep this safe — you'll need it to delete this document later.",
+            "✅ Document '{}' saved and indexed for AI search! \
+            doc_id: {} \
+            Keep this to delete the document later.",
             request.title,
             doc_id
         ),
@@ -194,7 +258,7 @@ fn add_document(
 }
 
 // ─────────────────────────────────────────────
-// Endpoint 4: /delete_document — Delete a Document
+// Endpoint 4: /delete_document
 // ─────────────────────────────────────────────
 
 #[post("/delete_document", format = "json", data = "<request>")]
@@ -203,39 +267,33 @@ fn delete_document(
     storage: &State<StorageLayer>,
 ) -> Json<DeleteDocumentResponse> {
 
-    println!("\n🪦 New /delete_document request received!");
+    println!("\n🪦  New /delete_document request received!");
     println!("  Deleting doc_id: {}", request.doc_id);
 
-    // Record the TOMBSTONE event
-    // Remember: we never actually delete anything
-    // We just write "this was deleted" into MORK
-    // The full history of the document still exists forever
     storage.inner().record_event(Event::Tombstone {
         doc_id: request.doc_id.clone(),
     }).expect("Failed to record Tombstone");
 
-    println!("  ✅ Tombstone recorded — document marked as deleted");
+    println!("  ✅ Tombstone recorded in MORK");
 
     Json(DeleteDocumentResponse {
         doc_id: request.doc_id.clone(),
         message: format!(
-            "Document {} marked as deleted. Note: history preserved forever in MORK.",
+            "Document {} marked as deleted. History preserved in MORK forever.",
             request.doc_id
         ),
     })
 }
 
 // ─────────────────────────────────────────────
-// Endpoint 5: /history — See Everything in MORK
+// Endpoint 5: /history
 // ─────────────────────────────────────────────
 
-// This is a GET endpoint — no data sent, just asking for information
 #[get("/history")]
 fn history(storage: &State<StorageLayer>) -> Json<HistoryResponse> {
 
-    println!("\n📚 /history requested — reading full MORK log...");
+    println!("\n📚 /history requested...");
 
-    // Get every event ever recorded
     let all_events = storage.inner().get_history();
     let total = all_events.len();
 
@@ -261,18 +319,9 @@ fn rocket() -> _ {
 
     let storage = StorageLayer::new("workbinder_events.log");
 
-    // CORS = Cross Origin Resource Sharing
-    // This tells the browser "yes, the frontend is allowed to talk to us"
-    // Without this, browsers BLOCK frontend requests to our backend
+    // CORS setup — allows frontend to talk to backend
     let cors = rocket_cors::CorsOptions {
-        
-        // AllowedOrigins = which websites are allowed to call our API
-        // "all()" means anyone can call it — fine for development
-        // In production you'd list specific URLs like "https://workbindr.com"
         allowed_origins: rocket_cors::AllowedOrigins::all(),
-        
-        // AllowedMethods = which HTTP methods are allowed
-        // We use GET and POST so we allow both
         allowed_methods: vec![
             rocket::http::Method::Get,
             rocket::http::Method::Post,
@@ -280,24 +329,15 @@ fn rocket() -> _ {
         .into_iter()
         .map(From::from)
         .collect(),
-        
-        // AllowedHeaders = which headers are allowed in requests
-        // "All" means we accept any headers — fine for now
         allowed_headers: rocket_cors::AllowedHeaders::all(),
-        
-        // allow_credentials = allow cookies/auth headers
         allow_credentials: true,
-        
         ..Default::default()
     }
-    // .to_cors() converts our options into actual CORS middleware
-    // "expect" crashes with a message if something is wrong
     .to_cors()
     .expect("CORS configuration failed");
 
     rocket::build()
         .manage(storage)
-        // .attach(cors) = "add CORS to every single request automatically"
         .attach(cors)
         .mount("/", routes![
             index,
