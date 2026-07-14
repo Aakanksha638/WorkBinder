@@ -26,7 +26,9 @@ pub struct StoredDocument {
     pub doc_id: String,
     pub title: String,
     pub content: String,
-    pub embedding: Vec<f32>,  // the meaning-numbers from Jina
+    pub embedding: Vec<f32>, 
+    pub department: String,  // "HR", "Finance", "Legal", "Engineering", "CEO"
+    pub uploaded_by: String, // emp_id of who uploaded it e.g. "0001"// the meaning-numbers from Jina
 }
 
 // Holds ALL documents in memory AND on disk
