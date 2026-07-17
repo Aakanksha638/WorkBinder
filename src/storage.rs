@@ -212,6 +212,57 @@ impl StorageLayer {
 
                 println!("  ✅ AI Response recorded in MORK");
             }
+            // ── TaskCreated ──────────────────
+            Event::TaskCreated {
+                task_id,
+                title,
+                assigned_to,
+                priority,
+                department
+            } => {
+                println!("📋 Processing TaskCreated event...");
+
+                let log_entry = format!(
+                    "[{}] EVENT: TaskCreated | task_id: {} | title: {} | \
+                    assigned_to: {} | priority: {} | department: {}",
+                    timestamp,
+                    task_id,
+                    title,
+                    assigned_to,
+                    priority,
+                    department
+                );
+
+                self.mork.append(&log_entry)
+                    .map_err(|e| format!("MORK write failed: {}", e))?;
+
+                println!("  ✅ Task creation recorded in MORK");
+            }
+
+            // ── TaskUpdated ──────────────────
+            Event::TaskUpdated {
+                task_id,
+                old_status,
+                new_status,
+                updated_by
+            } => {
+                println!("🔄 Processing TaskUpdated event...");
+
+                let log_entry = format!(
+                    "[{}] EVENT: TaskUpdated | task_id: {} | \
+                    {} → {} | updated_by: {}",
+                    timestamp,
+                    task_id,
+                    old_status,
+                    new_status,
+                    updated_by
+                );
+
+                self.mork.append(&log_entry)
+                    .map_err(|e| format!("MORK write failed: {}", e))?;
+
+                println!("  ✅ Task update recorded in MORK");
+            }
         }
 
         Ok(())
@@ -228,4 +279,6 @@ impl StorageLayer {
     pub fn get_event_count(&self) -> usize {
         self.get_history().len()
     }
+
+    
 }

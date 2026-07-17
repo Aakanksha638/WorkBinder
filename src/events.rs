@@ -1,22 +1,50 @@
-//this is out enum - the list of all things that can happen in our app
+// events.rs
+// Complete list of all things that can happen in WorkBindr
+// Each variant is ONE specific event type
 
 pub enum Event {
 
-//When a user types a question to the AI
-UserInput { 
-    query_id : String, //a unique ID for this question
-    query_text : String, // the actual question
-},
-//When someone adds a document
-DocumentAdded { 
-    doc_id : String, //unoque ID for the document
-    content : String,  // the actual text of the document
-},
-Tombstone {
-    doc_id : String,  //which id was deleted
-},
-QueryResponse { 
-    query_id : String,   //which question this answer
-    response_text : String, //the answer from the AI
-},
+    // ── AI Events ────────────────────────────
+    // Someone asked the AI a question
+    UserInput {
+        query_id: String,
+        query_text: String,
+    },
+
+    // AI gave back an answer
+    QueryResponse {
+        query_id: String,
+        response_text: String,
+    },
+
+    // ── Document Events ───────────────────────
+    // Someone added a document
+    DocumentAdded {
+        doc_id: String,
+        content: String,
+    },
+
+    // Someone deleted a document
+    // We never actually delete — just record it happened
+    Tombstone {
+        doc_id: String,
+    },
+
+    // ── Task Events ───────────────────────────
+    // Someone created a new task
+    TaskCreated {
+        task_id: String,
+        title: String,
+        assigned_to: String,
+        priority: String,
+        department: String,
+    },
+
+    // Someone updated a task's status
+    TaskUpdated {
+        task_id: String,
+        old_status: String,
+        new_status: String,
+        updated_by: String,
+    },
 }
