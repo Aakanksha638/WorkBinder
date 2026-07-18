@@ -112,7 +112,7 @@ pub struct StorageLayer {
     pub doc_store: DocumentStore,
 }
 
-impl StorageLayer {
+impl StorageLayer { 
 
     // Create a new StorageLayer with MORK and DocumentStore
     pub fn new(log_path: &str) -> Self {

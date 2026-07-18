@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 // ─────────────────────────────────────────────
 // Types
@@ -13,6 +13,21 @@ interface Employee {
   role: string;
 }
 
+interface Task {
+  task_id: string;
+  title: string;
+  description: string;
+  priority: string;
+  priority_emoji: string;
+  status: string;
+  status_emoji: string;
+  created_by: string;
+  assigned_to: string;
+  department: string;
+  created_at: number;
+  updated_at: number;
+}
+
 interface Message {
   role: "user" | "assistant" | "system";
   content: string;
@@ -20,9 +35,10 @@ interface Message {
 }
 
 // ─────────────────────────────────────────────
-// Department Colors
-// Each department gets its own color badge
+// Constants
 // ─────────────────────────────────────────────
+
+const API = "http://127.0.0.1:8000";
 
 const deptColors: Record<string, string> = {
   HR:          "bg-pink-600",
@@ -42,43 +58,78 @@ const deptIcons: Record<string, string> = {
   Unknown:     "❓",
 };
 
+const priorityColors: Record<string, string> = {
+  Low:    "border-green-600 text-green-400",
+  Medium: "border-yellow-600 text-yellow-400",
+  High:   "border-red-600 text-red-400",
+  Urgent: "border-red-400 text-red-300 animate-pulse",
+};
+
+const statusColors: Record<string, string> = {
+  Todo:       "bg-gray-700 text-gray-300",
+  InProgress: "bg-blue-700 text-blue-200",
+  Done:       "bg-green-700 text-green-200",
+};
+
 // ─────────────────────────────────────────────
 // Main App
 // ─────────────────────────────────────────────
 
 export default function Home() {
 
-  // ── Login State ──────────────────────────
-  const [empIdInput, setEmpIdInput] = useState("");
-  const [employee, setEmployee] = useState<Employee | null>(null);
-  const [loginError, setLoginError] = useState("");
+  // ── Auth State ───────────────────────────
+  const [empIdInput, setEmpIdInput]   = useState("");
+  const [employee, setEmployee]       = useState<Employee | null>(null);
+  const [loginError, setLoginError]   = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
 
+  // ── Tab State ────────────────────────────
+const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history">("chat");
   // ── Chat State ───────────────────────────
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [question, setQuestion] = useState("");
+  const [messages, setMessages]       = useState<Message[]>([]);
+  const [question, setQuestion]       = useState("");
   const [queryLoading, setQueryLoading] = useState(false);
 
-  // ── Document State ───────────────────────
-  const [docTitle, setDocTitle] = useState("");
-  const [docContent, setDocContent] = useState("");
-  const [docResult, setDocResult] = useState("");
-  const [docLoading, setDocLoading] = useState(false);
+  // ── Task State ───────────────────────────
+  const [myTasks, setMyTasks]         = useState<Task[]>([]);
+  const [createdTasks, setCreatedTasks] = useState<Task[]>([]);
+  const [allTasks, setAllTasks]       = useState<Task[]>([]);
+  const [tasksLoading, setTasksLoading] = useState(false);
+  const [taskView, setTaskView]       = useState<"mine" | "created" | "all">("mine");
 
-  // ── Delete State ─────────────────────────
-  const [deleteId, setDeleteId] = useState("");
+  // Create task form
+  const [newTaskTitle, setNewTaskTitle]   = useState("");
+  const [newTaskDesc, setNewTaskDesc]     = useState("");
+  const [newTaskPriority, setNewTaskPriority] = useState("Medium");
+  const [newTaskAssignee, setNewTaskAssignee] = useState("");
+  const [taskResult, setTaskResult]       = useState("");
+  const [showCreateTask, setShowCreateTask] = useState(false);
+
+  // ── Document State ───────────────────────
+  const [docTitle, setDocTitle]     = useState("");
+  const [docContent, setDocContent] = useState("");
+  const [docResult, setDocResult]   = useState("");
+  const [docLoading, setDocLoading] = useState(false);
+  const [deleteId, setDeleteId]     = useState("");
   const [deleteResult, setDeleteResult] = useState("");
 
   // ── History State ────────────────────────
-  const [history, setHistory] = useState<string[]>([]);
-  const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory]         = useState<string[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-
-  // ── Active Tab ───────────────────────────
-  const [activeTab, setActiveTab] = useState<"chat" | "docs" | "history">("chat");
+  const [showHistory, setShowHistory] = useState(false);
 
   // ─────────────────────────────────────────
-  // Login Function
+  // Load tasks when tab opens
+  // ─────────────────────────────────────────
+
+  useEffect(() => {
+    if (activeTab === "tasks" && employee) {
+      loadTasks();
+    }
+  }, [activeTab, employee]);
+
+  // ─────────────────────────────────────────
+  // Login
   // ─────────────────────────────────────────
 
   const handleLogin = async () => {
@@ -87,48 +138,136 @@ export default function Home() {
     setLoginError("");
 
     try {
-      const response = await fetch(
-        `http://127.0.0.1:8000/employee/${empIdInput.trim()}`
-      );
-      const data: Employee = await response.json();
+      const res = await fetch(`${API}/employee/${empIdInput.trim()}`);
+      const data: Employee = await res.json();
 
       if (data.role === "Employee not found") {
-        setLoginError(
-          `❌ Employee ID '${empIdInput}' not found. Please check your ID.`
-        );
+        setLoginError(`❌ Employee ID '${empIdInput}' not found.`);
       } else {
         setEmployee(data);
-        // Welcome message in chat
         setMessages([{
           role: "system",
-          content: `Welcome ${data.name}! You're logged in as ${data.role} in the ${data.department} department. You can only access ${data.department} documents.`,
+          content: `Welcome ${data.name}! You're logged in as ${data.role} in ${data.department}. You can only access ${data.department} documents.`,
         }]);
       }
     } catch {
-      setLoginError("❌ Cannot connect to WorkBindr server. Is it running?");
+      setLoginError("❌ Cannot connect to WorkBindr server.");
     }
-
     setLoginLoading(false);
   };
 
   // ─────────────────────────────────────────
-  // Ask AI Function
+  // Load Tasks
+  // ─────────────────────────────────────────
+
+  const loadTasks = async () => {
+    if (!employee) return;
+    setTasksLoading(true);
+
+    try {
+      // Load tasks assigned to me
+      const mineRes = await fetch(`${API}/tasks/mine/${employee.emp_id}`);
+      const mineData = await mineRes.json();
+      setMyTasks(mineData.tasks || []);
+
+      // Load tasks I created
+      const createdRes = await fetch(`${API}/tasks/created/${employee.emp_id}`);
+      const createdData = await createdRes.json();
+      setCreatedTasks(createdData.tasks || []);
+
+      // CEO sees all tasks
+      if (employee.department === "CEO") {
+        const allRes = await fetch(`${API}/tasks/all`);
+        const allData = await allRes.json();
+        setAllTasks(allData.tasks || []);
+      }
+    } catch {
+      console.error("Failed to load tasks");
+    }
+    setTasksLoading(false);
+  };
+
+  // ─────────────────────────────────────────
+  // Create Task
+  // ─────────────────────────────────────────
+
+  const handleCreateTask = async () => {
+    if (!newTaskTitle || !newTaskAssignee || !employee) return;
+
+    try {
+      const res = await fetch(`${API}/tasks/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          emp_id: employee.emp_id,
+          assigned_to: newTaskAssignee,
+          title: newTaskTitle,
+          description: newTaskDesc,
+          priority: newTaskPriority,
+        }),
+      });
+
+      const data = await res.json();
+      setTaskResult(data.message);
+
+      if (data.success) {
+        // Clear form and reload tasks
+        setNewTaskTitle("");
+        setNewTaskDesc("");
+        setNewTaskAssignee("");
+        setNewTaskPriority("Medium");
+        setShowCreateTask(false);
+        await loadTasks();
+      }
+    } catch {
+      setTaskResult("❌ Error creating task.");
+    }
+  };
+
+  // ─────────────────────────────────────────
+  // Update Task Status
+  // ─────────────────────────────────────────
+
+  const handleUpdateStatus = async (
+    task_id: string,
+    new_status: string
+  ) => {
+    if (!employee) return;
+
+    try {
+      const res = await fetch(`${API}/tasks/update`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          emp_id: employee.emp_id,
+          task_id,
+          new_status,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        await loadTasks(); // reload to show updated status
+      }
+    } catch {
+      console.error("Failed to update task");
+    }
+  };
+
+  // ─────────────────────────────────────────
+  // Ask AI
   // ─────────────────────────────────────────
 
   const handleQuery = async () => {
     if (!question.trim() || !employee) return;
 
-    // Add user message to chat
-    const userMessage: Message = {
-      role: "user",
-      content: question,
-    };
-    setMessages(prev => [...prev, userMessage]);
+    const userMsg: Message = { role: "user", content: question };
+    setMessages(prev => [...prev, userMsg]);
     setQuestion("");
     setQueryLoading(true);
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/query", {
+      const res = await fetch(`${API}/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -136,37 +275,32 @@ export default function Home() {
           query_text: question,
         }),
       });
-
-      const data = await response.json();
-
-      // Add AI response to chat
+      const data = await res.json();
       setMessages(prev => [...prev, {
         role: "assistant",
         content: data.message,
         department: data.department,
       }]);
-
     } catch {
       setMessages(prev => [...prev, {
         role: "assistant",
-        content: "❌ Error connecting to backend. Is the Rust server running?",
+        content: "❌ Error connecting to backend.",
       }]);
     }
-
     setQueryLoading(false);
   };
 
   // ─────────────────────────────────────────
-  // Upload Document Function
+  // Upload Document
   // ─────────────────────────────────────────
 
   const handleAddDocument = async () => {
-    if (!docTitle.trim() || !docContent.trim() || !employee) return;
+    if (!docTitle || !docContent || !employee) return;
     setDocLoading(true);
     setDocResult("");
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/add_document", {
+      const res = await fetch(`${API}/add_document`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -175,28 +309,25 @@ export default function Home() {
           content: docContent,
         }),
       });
-
-      const data = await response.json();
+      const data = await res.json();
       setDocResult(data.message);
       setDocTitle("");
       setDocContent("");
-
     } catch {
-      setDocResult("❌ Error connecting to backend.");
+      setDocResult("❌ Error uploading document.");
     }
-
     setDocLoading(false);
   };
 
   // ─────────────────────────────────────────
-  // Delete Document Function
+  // Delete Document
   // ─────────────────────────────────────────
 
   const handleDeleteDocument = async () => {
-    if (!deleteId.trim() || !employee) return;
+    if (!deleteId || !employee) return;
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/delete_document", {
+      const res = await fetch(`${API}/delete_document`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -204,32 +335,28 @@ export default function Home() {
           doc_id: deleteId,
         }),
       });
-
-      const data = await response.json();
+      const data = await res.json();
       setDeleteResult(data.message);
       setDeleteId("");
-
     } catch {
-      setDeleteResult("❌ Error connecting to backend.");
+      setDeleteResult("❌ Error deleting document.");
     }
   };
 
   // ─────────────────────────────────────────
-  // Load History Function
+  // Load History
   // ─────────────────────────────────────────
 
   const handleHistory = async () => {
     setHistoryLoading(true);
     setShowHistory(true);
-
     try {
-      const response = await fetch("http://127.0.0.1:8000/history");
-      const data = await response.json();
+      const res = await fetch(`${API}/history`);
+      const data = await res.json();
       setHistory(data.events);
     } catch {
-      setHistory(["❌ Error connecting to backend."]);
+      setHistory(["❌ Error loading history."]);
     }
-
     setHistoryLoading(false);
   };
 
@@ -241,11 +368,89 @@ export default function Home() {
     setEmployee(null);
     setMessages([]);
     setEmpIdInput("");
-    setDocResult("");
-    setDeleteResult("");
-    setHistory([]);
-    setShowHistory(false);
+    setMyTasks([]);
+    setCreatedTasks([]);
+    setAllTasks([]);
     setActiveTab("chat");
+  };
+
+  // ─────────────────────────────────────────
+  // Task Card Component
+  // ─────────────────────────────────────────
+
+  const TaskCard = ({ task }: { task: Task }) => {
+    const isAssignedToMe = task.assigned_to === employee?.emp_id;
+
+    return (
+      <div className={`bg-gray-800 rounded-xl p-4 border-l-4
+                      ${priorityColors[task.priority]?.split(" ")[0] || "border-gray-600"}`}>
+
+        {/* Task Header */}
+        <div className="flex items-start justify-between mb-2">
+          <div className="flex-1">
+            <h3 className="text-white font-semibold text-sm">
+              {task.title}
+            </h3>
+            <p className="text-gray-400 text-xs mt-1">
+              {task.description}
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-1 ml-3">
+            {/* Priority Badge */}
+            <span className={`text-xs px-2 py-0.5 rounded-full border
+                             ${priorityColors[task.priority]}`}>
+              {task.priority_emoji} {task.priority}
+            </span>
+            {/* Status Badge */}
+            <span className={`text-xs px-2 py-0.5 rounded-full
+                             ${statusColors[task.status]}`}>
+              {task.status_emoji} {task.status}
+            </span>
+          </div>
+        </div>
+
+        {/* Task Meta */}
+        <div className="flex items-center gap-3 text-xs text-gray-500 mb-3">
+          <span>From: {task.created_by}</span>
+          <span>→</span>
+          <span>To: {task.assigned_to}</span>
+          <span className={`${deptColors[task.department]} 
+                            text-white px-2 py-0.5 rounded-full text-xs`}>
+            {task.department}
+          </span>
+        </div>
+
+        {/* Status Update Buttons — only for assignee */}
+        {isAssignedToMe && task.status !== "Done" && (
+          <div className="flex gap-2">
+            {task.status === "Todo" && (
+              <button
+                onClick={() => handleUpdateStatus(task.task_id, "InProgress")}
+                className="bg-blue-600 hover:bg-blue-500 text-white
+                           text-xs px-3 py-1.5 rounded-lg transition-colors"
+              >
+                ⚙️ Start
+              </button>
+            )}
+            {task.status === "InProgress" && (
+              <button
+                onClick={() => handleUpdateStatus(task.task_id, "Done")}
+                className="bg-green-600 hover:bg-green-500 text-white
+                           text-xs px-3 py-1.5 rounded-lg transition-colors"
+              >
+                ✅ Mark Done
+              </button>
+            )}
+          </div>
+        )}
+
+        {task.status === "Done" && (
+          <div className="text-green-400 text-xs">
+            ✅ Completed
+          </div>
+        )}
+      </div>
+    );
   };
 
   // ─────────────────────────────────────────
@@ -254,44 +459,39 @@ export default function Home() {
 
   if (!employee) {
     return (
-      <main className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
+      <main className="min-h-screen bg-gray-950 flex items-center
+                       justify-center p-4">
         <div className="w-full max-w-md">
 
-          {/* Logo */}
           <div className="text-center mb-8">
             <h1 className="text-5xl font-bold text-blue-400 mb-2">
               WorkBindr
             </h1>
-            <p className="text-gray-400">
-              Enterprise AI Business OS
-            </p>
+            <p className="text-gray-400">Enterprise AI Business OS</p>
             <p className="text-gray-600 text-sm mt-1">
               Powered by Rust + MORK + Groq AI
             </p>
           </div>
 
-          {/* Login Card */}
           <div className="bg-gray-900 rounded-2xl p-8 border border-gray-800">
             <h2 className="text-xl font-semibold text-white mb-6 text-center">
               🔐 Employee Login
             </h2>
 
-            <div className="mb-4">
-              <label className="block text-gray-400 text-sm mb-2">
-                Employee ID
-              </label>
-              <input
-                type="text"
-                value={empIdInput}
-                onChange={(e) => setEmpIdInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-                placeholder="Enter your Employee ID e.g. 0001"
-                className="w-full bg-gray-800 text-white rounded-xl px-4 py-3
-                           border border-gray-700 focus:outline-none
-                           focus:border-blue-500 placeholder-gray-500
-                           text-center text-lg tracking-widest"
-              />
-            </div>
+            <label className="block text-gray-400 text-sm mb-2">
+              Employee ID
+            </label>
+            <input
+              type="text"
+              value={empIdInput}
+              onChange={(e) => setEmpIdInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+              placeholder="e.g. 0001"
+              className="w-full bg-gray-800 text-white rounded-xl px-4 py-3
+                         border border-gray-700 focus:outline-none
+                         focus:border-blue-500 placeholder-gray-500
+                         text-center text-lg tracking-widest mb-4"
+            />
 
             {loginError && (
               <div className="mb-4 bg-red-900/30 border border-red-700
@@ -305,12 +505,12 @@ export default function Home() {
               disabled={loginLoading}
               className="w-full bg-blue-600 hover:bg-blue-500
                          disabled:bg-gray-700 text-white font-semibold
-                         py-3 rounded-xl transition-colors duration-200"
+                         py-3 rounded-xl transition-colors"
             >
               {loginLoading ? "Verifying..." : "Login →"}
             </button>
 
-            {/* Demo Employee IDs */}
+            {/* Demo Employees */}
             <div className="mt-6 border-t border-gray-800 pt-4">
               <p className="text-gray-500 text-xs text-center mb-3">
                 Demo Employee IDs
@@ -318,7 +518,7 @@ export default function Home() {
               <div className="grid grid-cols-3 gap-2">
                 {[
                   { id: "0000", label: "👑 CEO" },
-                  { id: "0001", label: "👥 HR" },
+                  { id: "0001", label: "👥 HR Mgr" },
                   { id: "0003", label: "💰 Finance" },
                   { id: "0005", label: "⚖️ Legal" },
                   { id: "0007", label: "⚙️ Eng" },
@@ -344,27 +544,22 @@ export default function Home() {
   }
 
   // ─────────────────────────────────────────
-  // RENDER — Main App (After Login)
+  // RENDER — Main App
   // ─────────────────────────────────────────
 
   const deptColor = deptColors[employee.department] || "bg-gray-600";
-  const deptIcon = deptIcons[employee.department] || "❓";
+  const deptIcon  = deptIcons[employee.department]  || "❓";
 
   return (
     <main className="min-h-screen bg-gray-950 text-white">
 
-      {/* ── Top Navigation Bar ── */}
+      {/* ── Navbar ── */}
       <nav className="bg-gray-900 border-b border-gray-800 px-6 py-4">
-        <div className="max-w-5xl mx-auto flex items-center justify-between">
-
-          {/* Logo */}
-          <h1 className="text-2xl font-bold text-blue-400">
-            WorkBindr
-          </h1>
-
-          {/* Employee Badge */}
+        <div className="max-w-6xl mx-auto flex items-center justify-between">
+          <h1 className="text-2xl font-bold text-blue-400">WorkBindr</h1>
           <div className="flex items-center gap-3">
-            <div className={`${deptColor} px-3 py-1 rounded-full text-xs font-semibold`}>
+            <div className={`${deptColor} px-3 py-1 rounded-full
+                            text-xs font-semibold`}>
               {deptIcon} {employee.department}
             </div>
             <div className="text-right">
@@ -386,18 +581,21 @@ export default function Home() {
         </div>
       </nav>
 
-      {/* ── Tab Navigation ── */}
+      {/* ── Tabs ── */}
       <div className="bg-gray-900 border-b border-gray-800">
-        <div className="max-w-5xl mx-auto px-6">
+        <div className="max-w-6xl mx-auto px-6">
           <div className="flex gap-1">
             {[
-              { id: "chat", label: "🤖 AI Chat" },
-              { id: "docs", label: "📄 Documents" },
+              { id: "chat",    label: "🤖 AI Chat" },
+              { id: "tasks",   label: "📋 Tasks" },
+              { id: "docs",    label: "📄 Documents" },
               { id: "history", label: "📚 MORK History" },
             ].map((tab) => (
               <button
                 key={tab.id}
-                onClick={() => setActiveTab(tab.id as "chat" | "docs" | "history")}
+                onClick={() => setActiveTab(
+                  tab.id as "chat" | "tasks" | "docs" | "history"
+                )}
                 className={`px-4 py-3 text-sm font-medium transition-colors
                   ${activeTab === tab.id
                     ? "text-blue-400 border-b-2 border-blue-400"
@@ -411,29 +609,37 @@ export default function Home() {
         </div>
       </div>
 
-      {/* ── Main Content ── */}
-      <div className="max-w-5xl mx-auto px-6 py-6">
+      {/* ── Content ── */}
+      <div className="max-w-6xl mx-auto px-6 py-6">
 
-        {/* ── Tab 1: AI Chat ── */}
+        {/* ════════════════════════════════
+            TAB 1: AI CHAT
+        ════════════════════════════════ */}
         {activeTab === "chat" && (
           <div className="flex flex-col h-[calc(100vh-220px)]">
 
-            {/* Permission Banner */}
-            <div className={`${deptColor} bg-opacity-20 border 
+            {/* Permission banner */}
+            <div className={`${deptColor} bg-opacity-20 border
                             border-opacity-30 rounded-xl p-3 mb-4
-                            flex items-center gap-2`}>
+                            flex items-center gap-2 text-sm text-gray-300`}>
               <span>{deptIcon}</span>
-              <span className="text-sm text-gray-300">
-                You are in <strong>{employee.department}</strong> department.
-                You can only access <strong>{employee.department}</strong> documents.
-                {employee.department === "CEO" && " As CEO, you have access to all departments."}
+              <span>
+                You are in <strong>{employee.department}</strong>.
+                AI only searches your department documents.
+                {employee.department === "CEO" &&
+                  " As CEO you have full access."}
               </span>
             </div>
 
-            {/* Chat Messages */}
+            {/* Messages */}
             <div className="flex-1 overflow-y-auto space-y-4 mb-4">
               {messages.map((msg, i) => (
-                <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                <div
+                  key={i}
+                  className={`flex ${msg.role === "user"
+                    ? "justify-end"
+                    : "justify-start"}`}
+                >
                   <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${
                     msg.role === "user"
                       ? "bg-blue-600 text-white"
@@ -444,13 +650,6 @@ export default function Home() {
                     {msg.role === "assistant" && (
                       <div className="text-xs text-gray-500 mb-1">
                         🤖 WorkBindr AI
-                        {msg.department && (
-                          <span className={`ml-2 ${deptColor} 
-                                          text-white px-2 py-0.5 
-                                          rounded-full text-xs`}>
-                            {msg.department}
-                          </span>
-                        )}
                       </div>
                     )}
                     <p className="leading-relaxed">{msg.content}</p>
@@ -460,16 +659,15 @@ export default function Home() {
 
               {queryLoading && (
                 <div className="flex justify-start">
-                  <div className="bg-gray-800 rounded-2xl px-4 py-3">
-                    <div className="text-gray-400 text-sm">
-                      🤖 Thinking...
-                    </div>
+                  <div className="bg-gray-800 rounded-2xl px-4 py-3
+                                  text-gray-400 text-sm">
+                    🤖 Thinking...
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Chat Input */}
+            {/* Input */}
             <div className="flex gap-3">
               <input
                 type="text"
@@ -486,7 +684,7 @@ export default function Home() {
                 disabled={queryLoading}
                 className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700
                            text-white font-semibold px-6 py-3 rounded-xl
-                           transition-colors duration-200"
+                           transition-colors"
               >
                 {queryLoading ? "..." : "Ask"}
               </button>
@@ -494,18 +692,224 @@ export default function Home() {
           </div>
         )}
 
-        {/* ── Tab 2: Documents ── */}
+        {/* ════════════════════════════════
+            TAB 2: TASKS
+        ════════════════════════════════ */}
+        {activeTab === "tasks" && (
+          <div>
+
+            {/* Task Header */}
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-2xl font-bold text-white">
+                📋 Task Board
+              </h2>
+              <button
+                onClick={() => setShowCreateTask(!showCreateTask)}
+                className="bg-blue-600 hover:bg-blue-500 text-white
+                           font-semibold px-4 py-2 rounded-xl
+                           transition-colors text-sm"
+              >
+                {showCreateTask ? "✕ Cancel" : "+ Create Task"}
+              </button>
+            </div>
+
+            {/* Create Task Form */}
+            {showCreateTask && (
+              <div className="bg-gray-900 rounded-2xl p-6 border
+                              border-gray-800 mb-6">
+                <h3 className="text-lg font-semibold text-blue-300 mb-4">
+                  Create New Task
+                </h3>
+
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="text-gray-400 text-xs mb-1 block">
+                      Task Title *
+                    </label>
+                    <input
+                      type="text"
+                      value={newTaskTitle}
+                      onChange={(e) => setNewTaskTitle(e.target.value)}
+                      placeholder="e.g. Review Q4 Budget"
+                      className="w-full bg-gray-800 text-white rounded-xl
+                                 px-4 py-3 border border-gray-700
+                                 focus:outline-none focus:border-blue-500
+                                 placeholder-gray-500 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-gray-400 text-xs mb-1 block">
+                      Assign To (Employee ID) *
+                    </label>
+                    <input
+                      type="text"
+                      value={newTaskAssignee}
+                      onChange={(e) => setNewTaskAssignee(e.target.value)}
+                      placeholder="e.g. 0003"
+                      className="w-full bg-gray-800 text-white rounded-xl
+                                 px-4 py-3 border border-gray-700
+                                 focus:outline-none focus:border-blue-500
+                                 placeholder-gray-500 text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="mb-4">
+                  <label className="text-gray-400 text-xs mb-1 block">
+                    Description
+                  </label>
+                  <textarea
+                    value={newTaskDesc}
+                    onChange={(e) => setNewTaskDesc(e.target.value)}
+                    placeholder="Task details..."
+                    rows={3}
+                    className="w-full bg-gray-800 text-white rounded-xl
+                               px-4 py-3 border border-gray-700
+                               focus:outline-none focus:border-blue-500
+                               placeholder-gray-500 text-sm"
+                  />
+                </div>
+
+                <div className="mb-4">
+                  <label className="text-gray-400 text-xs mb-1 block">
+                    Priority
+                  </label>
+                  <div className="flex gap-2">
+                    {["Low", "Medium", "High", "Urgent"].map((p) => (
+                      <button
+                        key={p}
+                        onClick={() => setNewTaskPriority(p)}
+                        className={`px-4 py-2 rounded-xl text-sm font-medium
+                                   transition-colors border ${
+                          newTaskPriority === p
+                            ? priorityColors[p]
+                            : "border-gray-700 text-gray-500"
+                        }`}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleCreateTask}
+                  className="bg-green-600 hover:bg-green-500 text-white
+                             font-semibold px-6 py-3 rounded-xl
+                             transition-colors"
+                >
+                  Create Task
+                </button>
+
+                {taskResult && (
+                  <div className="mt-3 bg-gray-800 rounded-xl p-3
+                                  text-green-300 text-sm">
+                    {taskResult}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Task View Switcher */}
+            <div className="flex gap-2 mb-4">
+              {[
+                { id: "mine",    label: `📥 Assigned to Me (${myTasks.length})` },
+                { id: "created", label: `📤 Created by Me (${createdTasks.length})` },
+                ...(employee.department === "CEO"
+                  ? [{ id: "all", label: `👑 All Tasks (${allTasks.length})` }]
+                  : []),
+              ].map((view) => (
+                <button
+                  key={view.id}
+                  onClick={() => setTaskView(view.id as "mine" | "created" | "all")}
+                  className={`px-4 py-2 rounded-xl text-sm transition-colors ${
+                    taskView === view.id
+                      ? "bg-blue-600 text-white"
+                      : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                  }`}
+                >
+                  {view.label}
+                </button>
+              ))}
+              <button
+                onClick={loadTasks}
+                className="ml-auto bg-gray-800 hover:bg-gray-700
+                           text-gray-400 px-3 py-2 rounded-xl
+                           text-sm transition-colors"
+              >
+                🔄 Refresh
+              </button>
+            </div>
+
+            {/* Task Lists */}
+            {tasksLoading ? (
+              <div className="text-gray-500 text-center py-8">
+                Loading tasks...
+              </div>
+            ) : (
+              <div>
+                {/* Kanban style — 3 columns */}
+                <div className="grid grid-cols-3 gap-4">
+                  {["Todo", "InProgress", "Done"].map((status) => {
+                    const currentTasks = taskView === "mine"
+                      ? myTasks
+                      : taskView === "created"
+                      ? createdTasks
+                      : allTasks;
+
+                    const filtered = currentTasks.filter(
+                      (t) => t.status === status
+                    );
+
+                    return (
+                      <div key={status} className="bg-gray-900 rounded-2xl p-4
+                                                   border border-gray-800">
+                        <div className="flex items-center gap-2 mb-4">
+                          <span className={`text-xs px-3 py-1 rounded-full
+                                          ${statusColors[status]}`}>
+                            {status === "Todo"       && "📋 Todo"}
+                            {status === "InProgress" && "⚙️ In Progress"}
+                            {status === "Done"       && "✅ Done"}
+                          </span>
+                          <span className="text-gray-500 text-xs">
+                            {filtered.length}
+                          </span>
+                        </div>
+
+                        <div className="space-y-3">
+                          {filtered.length === 0 ? (
+                            <p className="text-gray-600 text-xs text-center py-4">
+                              No tasks
+                            </p>
+                          ) : (
+                            filtered.map((task) => (
+                              <TaskCard key={task.task_id} task={task} />
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ════════════════════════════════
+            TAB 3: DOCUMENTS
+        ════════════════════════════════ */}
         {activeTab === "docs" && (
           <div className="space-y-6">
 
-            {/* Upload Document */}
+            {/* Upload */}
             <div className="bg-gray-900 rounded-2xl p-6 border border-gray-800">
               <h2 className="text-xl font-semibold text-blue-300 mb-2">
                 📄 Upload Document
               </h2>
               <p className="text-gray-500 text-sm mb-4">
-                Documents you upload will be automatically tagged to
-                <span className={`ml-1 ${deptColor} text-white 
+                Auto-tagged to
+                <span className={`ml-1 ${deptColor} text-white
                                   px-2 py-0.5 rounded-full text-xs`}>
                   {deptIcon} {employee.department}
                 </span>
@@ -520,7 +924,6 @@ export default function Home() {
                            border border-gray-700 focus:outline-none
                            focus:border-blue-500 placeholder-gray-500 mb-3"
               />
-
               <textarea
                 value={docContent}
                 onChange={(e) => setDocContent(e.target.value)}
@@ -530,13 +933,12 @@ export default function Home() {
                            border border-gray-700 focus:outline-none
                            focus:border-blue-500 placeholder-gray-500 mb-3"
               />
-
               <button
                 onClick={handleAddDocument}
                 disabled={docLoading}
                 className="bg-green-600 hover:bg-green-500 disabled:bg-gray-700
                            text-white font-semibold px-6 py-3 rounded-xl
-                           transition-colors duration-200"
+                           transition-colors"
               >
                 {docLoading ? "Uploading..." : `Upload to ${employee.department}`}
               </button>
@@ -549,12 +951,11 @@ export default function Home() {
               )}
             </div>
 
-            {/* Delete Document */}
+            {/* Delete */}
             <div className="bg-gray-900 rounded-2xl p-6 border border-gray-800">
               <h2 className="text-xl font-semibold text-blue-300 mb-4">
                 🗑️ Delete Document
               </h2>
-
               <div className="flex gap-3">
                 <input
                   type="text"
@@ -568,13 +969,11 @@ export default function Home() {
                 <button
                   onClick={handleDeleteDocument}
                   className="bg-red-600 hover:bg-red-500 text-white
-                             font-semibold px-6 py-3 rounded-xl
-                             transition-colors duration-200"
+                             font-semibold px-6 py-3 rounded-xl transition-colors"
                 >
                   Delete
                 </button>
               </div>
-
               {deleteResult && (
                 <div className="mt-3 bg-gray-800 rounded-xl p-4
                                 border border-red-800">
@@ -585,7 +984,9 @@ export default function Home() {
           </div>
         )}
 
-        {/* ── Tab 3: MORK History ── */}
+        {/* ════════════════════════════════
+            TAB 4: MORK HISTORY
+        ════════════════════════════════ */}
         {activeTab === "history" && (
           <div className="bg-gray-900 rounded-2xl p-6 border border-gray-800">
             <div className="flex justify-between items-center mb-4">
@@ -596,9 +997,9 @@ export default function Home() {
                 onClick={handleHistory}
                 className="bg-purple-600 hover:bg-purple-500 text-white
                            font-semibold px-4 py-2 rounded-xl
-                           transition-colors duration-200 text-sm"
+                           transition-colors text-sm"
               >
-                {historyLoading ? "Loading..." : "Refresh"}
+                {historyLoading ? "Loading..." : "🔄 Refresh"}
               </button>
             </div>
 
@@ -609,18 +1010,29 @@ export default function Home() {
             )}
 
             {showHistory && (
-              <div className="space-y-2 max-h-96 overflow-y-auto">
+              <div className="space-y-2 max-h-[600px] overflow-y-auto">
                 {history.length === 0 ? (
                   <p className="text-gray-500 text-sm">No events yet.</p>
                 ) : (
-                  history.map((event, index) => (
+                  history.map((event, i) => (
                     <div
-                      key={index}
-                      className="bg-gray-800 rounded-lg p-3
-                                 border border-gray-700 font-mono
-                                 text-xs text-gray-300"
+                      key={i}
+                      className={`bg-gray-800 rounded-lg p-3 border
+                                 font-mono text-xs ${
+                        event.includes("TaskCreated")
+                          ? "border-blue-800 text-blue-300"
+                          : event.includes("TaskUpdated")
+                          ? "border-green-800 text-green-300"
+                          : event.includes("DocumentAdded")
+                          ? "border-yellow-800 text-yellow-300"
+                          : event.includes("Tombstone")
+                          ? "border-red-800 text-red-300"
+                          : event.includes("UserInput")
+                          ? "border-purple-800 text-purple-300"
+                          : "border-gray-700 text-gray-300"
+                      }`}
                     >
-                      #{index + 1}: {event}
+                      #{i + 1}: {event}
                     </div>
                   ))
                 )}
