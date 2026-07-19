@@ -84,7 +84,7 @@ export default function Home() {
   const [loginLoading, setLoginLoading] = useState(false);
 
   // ── Tab State ────────────────────────────
-const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history">("chat");
+const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history" | "admin">("chat");
   // ── Chat State ───────────────────────────
   const [messages, setMessages]       = useState<Message[]>([]);
   const [question, setQuestion]       = useState("");
@@ -590,12 +590,16 @@ const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history"
               { id: "tasks",   label: "📋 Tasks" },
               { id: "docs",    label: "📄 Documents" },
               { id: "history", label: "📚 MORK History" },
+              ...(employee.department === "CEO"
+                ? [{ id: "admin", label: "👑 Admin" }]
+                : []),
             ].map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(
-                  tab.id as "chat" | "tasks" | "docs" | "history"
+                  tab.id as "chat" | "tasks" | "docs" | "history" | "admin"
                 )}
+                
                 className={`px-4 py-3 text-sm font-medium transition-colors
                   ${activeTab === tab.id
                     ? "text-blue-400 border-b-2 border-blue-400"
@@ -1009,6 +1013,13 @@ const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history"
               </p>
             )}
 
+            {/* ════════════════════════════════
+            TAB 5: ADMIN PANEL (CEO only)
+        ════════════════════════════════ */}
+        {activeTab === "admin" && employee.department === "CEO" && (
+          <AdminPanel employee={employee} />
+        )}
+
             {showHistory && (
               <div className="space-y-2 max-h-[600px] overflow-y-auto">
                 {history.length === 0 ? (
@@ -1044,6 +1055,471 @@ const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history"
           </div>
         )}
       </div>
+      
     </main>
+    
+  );
+}
+// ─────────────────────────────────────────────
+// Admin Panel Component
+// Only visible to CEO
+// ─────────────────────────────────────────────
+
+function AdminPanel({ employee }: { employee: Employee }) {
+
+  const API = "http://127.0.0.1:8000";
+
+  // Stats
+  interface Stats {
+    total_employees: number;
+    total_events: number;
+    total_tasks: number;
+    total_tasks_done: number;
+    departments: Array<{
+      name: string;
+      employee_count: number;
+      task_count: number;
+    }>;
+  }
+
+  interface EmployeeInfo {
+    emp_id: string;
+    name: string;
+    department: string;
+    role: string;
+  }
+
+  const [stats, setStats]           = useState<Stats | null>(null);
+  const [employees, setEmployees]   = useState<EmployeeInfo[]>([]);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [adminView, setAdminView]   = useState<"stats" | "employees" | "add">("stats");
+
+  // Add employee form
+  const [newEmpId,   setNewEmpId]   = useState("");
+  const [newEmpName, setNewEmpName] = useState("");
+  const [newEmpDept, setNewEmpDept] = useState("HR");
+  const [newEmpRole, setNewEmpRole] = useState("");
+  const [addResult,  setAddResult]  = useState("");
+
+  // Deactivate
+  const [deactivateId,     setDeactivateId]     = useState("");
+  const [deactivateResult, setDeactivateResult] = useState("");
+
+  // Load stats on mount
+  useEffect(() => {
+    loadStats();
+    loadEmployees();
+  }, []);
+
+  const loadStats = async () => {
+    setStatsLoading(true);
+    try {
+      const res  = await fetch(`${API}/admin/stats`);
+      const data = await res.json();
+      setStats(data);
+    } catch {
+      console.error("Failed to load stats");
+    }
+    setStatsLoading(false);
+  };
+
+  const loadEmployees = async () => {
+    try {
+      const res  = await fetch(`${API}/admin/employees`);
+      const data = await res.json();
+      setEmployees(data.employees || []);
+    } catch {
+      console.error("Failed to load employees");
+    }
+  };
+
+  const handleAddEmployee = async () => {
+    if (!newEmpId || !newEmpName || !newEmpRole) return;
+
+    try {
+      const res = await fetch(`${API}/admin/add_employee`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          admin_emp_id: employee.emp_id,
+          emp_id:       newEmpId,
+          name:         newEmpName,
+          department:   newEmpDept,
+          role:         newEmpRole,
+        }),
+      });
+      const data = await res.json();
+      setAddResult(data.message);
+
+      if (data.success) {
+        setNewEmpId("");
+        setNewEmpName("");
+        setNewEmpRole("");
+        await loadEmployees();
+        await loadStats();
+      }
+    } catch {
+      setAddResult("❌ Error adding employee.");
+    }
+  };
+
+  const handleDeactivate = async () => {
+    if (!deactivateId) return;
+    try {
+      const res = await fetch(`${API}/admin/deactivate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          admin_emp_id: employee.emp_id,
+          emp_id:       deactivateId,
+        }),
+      });
+      const data = await res.json();
+      setDeactivateResult(data.message);
+      if (data.success) {
+        setDeactivateId("");
+        await loadEmployees();
+        await loadStats();
+      }
+    } catch {
+      setDeactivateResult("❌ Error deactivating employee.");
+    }
+  };
+
+  const deptColors: Record<string, string> = {
+    HR:          "bg-pink-600",
+    Finance:     "bg-green-600",
+    Legal:       "bg-yellow-600",
+    Engineering: "bg-blue-600",
+    CEO:         "bg-purple-600",
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold text-white">👑 Admin Panel</h2>
+        <span className="text-gray-500 text-sm">CEO Access Only</span>
+      </div>
+
+      {/* Admin Sub-tabs */}
+      <div className="flex gap-2 mb-6">
+        {[
+          { id: "stats",     label: "📊 Platform Stats" },
+          { id: "employees", label: "👥 All Employees" },
+          { id: "add",       label: "➕ Add Employee" },
+        ].map((v) => (
+          <button
+            key={v.id}
+            onClick={() => setAdminView(v.id as "stats" | "employees" | "add")}
+            className={`px-4 py-2 rounded-xl text-sm transition-colors ${
+              adminView === v.id
+                ? "bg-purple-600 text-white"
+                : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+            }`}
+          >
+            {v.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Stats View ── */}
+      {adminView === "stats" && (
+        <div>
+          {statsLoading ? (
+            <p className="text-gray-500">Loading stats...</p>
+          ) : stats ? (
+            <div>
+              {/* Top Stats Cards */}
+              <div className="grid grid-cols-4 gap-4 mb-6">
+                {[
+                  {
+                    label: "Total Employees",
+                    value: stats.total_employees,
+                    icon:  "👥",
+                    color: "border-blue-600",
+                  },
+                  {
+                    label: "Total Events",
+                    value: stats.total_events,
+                    icon:  "📝",
+                    color: "border-purple-600",
+                  },
+                  {
+                    label: "Total Tasks",
+                    value: stats.total_tasks,
+                    icon:  "📋",
+                    color: "border-yellow-600",
+                  },
+                  {
+                    label: "Tasks Done",
+                    value: stats.total_tasks_done,
+                    icon:  "✅",
+                    color: "border-green-600",
+                  },
+                ].map((stat) => (
+                  <div
+                    key={stat.label}
+                    className={`bg-gray-900 rounded-2xl p-5 border-l-4
+                               ${stat.color} border border-gray-800`}
+                  >
+                    <div className="text-3xl mb-1">{stat.icon}</div>
+                    <div className="text-3xl font-bold text-white">
+                      {stat.value}
+                    </div>
+                    <div className="text-gray-400 text-sm mt-1">
+                      {stat.label}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Department Stats */}
+              <div className="bg-gray-900 rounded-2xl p-6 border border-gray-800">
+                <h3 className="text-lg font-semibold text-white mb-4">
+                  Department Overview
+                </h3>
+                <div className="space-y-3">
+                  {stats.departments.map((dept) => (
+                    <div
+                      key={dept.name}
+                      className="flex items-center justify-between
+                                 bg-gray-800 rounded-xl p-4"
+                    >
+                      <div className="flex items-center gap-3">
+                        <span className={`${deptColors[dept.name] || "bg-gray-600"}
+                                         text-white px-3 py-1 rounded-full
+                                         text-xs font-semibold`}>
+                          {dept.name}
+                        </span>
+                      </div>
+                      <div className="flex gap-6 text-sm">
+                        <div className="text-center">
+                          <div className="text-white font-bold">
+                            {dept.employee_count}
+                          </div>
+                          <div className="text-gray-500 text-xs">
+                            Employees
+                          </div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-white font-bold">
+                            {dept.task_count}
+                          </div>
+                          <div className="text-gray-500 text-xs">Tasks</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                onClick={() => { loadStats(); loadEmployees(); }}
+                className="mt-4 bg-gray-800 hover:bg-gray-700 text-gray-400
+                           px-4 py-2 rounded-xl text-sm transition-colors"
+              >
+                🔄 Refresh Stats
+              </button>
+            </div>
+          ) : (
+            <p className="text-gray-500">No stats available.</p>
+          )}
+        </div>
+      )}
+
+      {/* ── Employees View ── */}
+      {adminView === "employees" && (
+        <div>
+          <div className="bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-gray-800">
+                  <th className="text-left p-4 text-gray-400 text-sm font-medium">
+                    ID
+                  </th>
+                  <th className="text-left p-4 text-gray-400 text-sm font-medium">
+                    Name
+                  </th>
+                  <th className="text-left p-4 text-gray-400 text-sm font-medium">
+                    Department
+                  </th>
+                  <th className="text-left p-4 text-gray-400 text-sm font-medium">
+                    Role
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {employees.map((emp) => (
+                  <tr
+                    key={emp.emp_id}
+                    className="border-b border-gray-800 hover:bg-gray-800
+                               transition-colors"
+                  >
+                    <td className="p-4 font-mono text-gray-300 text-sm">
+                      {emp.emp_id}
+                    </td>
+                    <td className="p-4 text-white font-medium">{emp.name}</td>
+                    <td className="p-4">
+                      <span className={`${deptColors[emp.department] || "bg-gray-600"}
+                                        text-white px-2 py-0.5 rounded-full
+                                        text-xs`}>
+                        {emp.department}
+                      </span>
+                    </td>
+                    <td className="p-4 text-gray-400 text-sm">{emp.role}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Deactivate Employee */}
+          <div className="mt-6 bg-gray-900 rounded-2xl p-6 border border-red-900">
+            <h3 className="text-lg font-semibold text-red-400 mb-4">
+              ⚠️ Deactivate Employee
+            </h3>
+            <div className="flex gap-3">
+              <input
+                type="text"
+                value={deactivateId}
+                onChange={(e) => setDeactivateId(e.target.value)}
+                placeholder="Employee ID to deactivate e.g. 0008"
+                className="flex-1 bg-gray-800 text-white rounded-xl px-4 py-3
+                           border border-gray-700 focus:outline-none
+                           focus:border-red-500 placeholder-gray-500 text-sm"
+              />
+              <button
+                onClick={handleDeactivate}
+                className="bg-red-600 hover:bg-red-500 text-white
+                           font-semibold px-6 py-3 rounded-xl transition-colors"
+              >
+                Deactivate
+              </button>
+            </div>
+            {deactivateResult && (
+              <div className="mt-3 bg-gray-800 rounded-xl p-3
+                              text-red-300 text-sm">
+                {deactivateResult}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Add Employee View ── */}
+      {adminView === "add" && (
+        <div className="bg-gray-900 rounded-2xl p-6 border border-gray-800">
+          <h3 className="text-lg font-semibold text-blue-300 mb-6">
+            ➕ Add New Employee
+          </h3>
+
+          <div className="grid grid-cols-2 gap-4 mb-4">
+            <div>
+              <label className="text-gray-400 text-xs mb-1 block">
+                Employee ID *
+              </label>
+              <input
+                type="text"
+                value={newEmpId}
+                onChange={(e) => setNewEmpId(e.target.value)}
+                placeholder="e.g. 0009"
+                className="w-full bg-gray-800 text-white rounded-xl px-4 py-3
+                           border border-gray-700 focus:outline-none
+                           focus:border-blue-500 placeholder-gray-500
+                           text-sm font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-gray-400 text-xs mb-1 block">
+                Full Name *
+              </label>
+              <input
+                type="text"
+                value={newEmpName}
+                onChange={(e) => setNewEmpName(e.target.value)}
+                placeholder="e.g. Rahul Singh"
+                className="w-full bg-gray-800 text-white rounded-xl px-4 py-3
+                           border border-gray-700 focus:outline-none
+                           focus:border-blue-500 placeholder-gray-500 text-sm"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 mb-4">
+            <div>
+              <label className="text-gray-400 text-xs mb-1 block">
+                Department *
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {["HR", "Finance", "Legal", "Engineering", "CEO"].map((d) => (
+                  <button
+                    key={d}
+                    onClick={() => setNewEmpDept(d)}
+                    className={`px-3 py-2 rounded-xl text-sm transition-colors ${
+                      newEmpDept === d
+                        ? `${deptColors[d]} text-white`
+                        : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                    }`}
+                  >
+                    {d}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="text-gray-400 text-xs mb-1 block">
+                Role/Title *
+              </label>
+              <input
+                type="text"
+                value={newEmpRole}
+                onChange={(e) => setNewEmpRole(e.target.value)}
+                placeholder="e.g. Senior Engineer"
+                className="w-full bg-gray-800 text-white rounded-xl px-4 py-3
+                           border border-gray-700 focus:outline-none
+                           focus:border-blue-500 placeholder-gray-500 text-sm"
+              />
+            </div>
+          </div>
+
+          {/* Preview Card */}
+          {newEmpId && newEmpName && (
+            <div className="mb-4 bg-gray-800 rounded-xl p-4 border
+                            border-gray-700">
+              <p className="text-gray-400 text-xs mb-2">Preview:</p>
+              <div className="flex items-center gap-3">
+                <span className="font-mono text-gray-300 text-sm">
+                  {newEmpId}
+                </span>
+                <span className="text-white font-medium">{newEmpName}</span>
+                <span className={`${deptColors[newEmpDept]} text-white
+                                  px-2 py-0.5 rounded-full text-xs`}>
+                  {newEmpDept}
+                </span>
+                <span className="text-gray-400 text-sm">{newEmpRole}</span>
+              </div>
+            </div>
+          )}
+
+          <button
+            onClick={handleAddEmployee}
+            className="bg-green-600 hover:bg-green-500 text-white
+                       font-semibold px-6 py-3 rounded-xl transition-colors"
+          >
+            ➕ Add Employee
+          </button>
+
+          {addResult && (
+            <div className={`mt-3 rounded-xl p-3 text-sm ${
+              addResult.includes("✅")
+                ? "bg-green-900/30 text-green-300 border border-green-800"
+                : "bg-red-900/30 text-red-300 border border-red-800"
+            }`}>
+              {addResult}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

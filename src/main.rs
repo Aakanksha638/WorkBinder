@@ -641,6 +641,57 @@ fn update_task(
     })
 }
 
+// ── Admin Shapes ─────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct AddEmployeeRequest {
+    admin_emp_id: String,   // must be CEO (0000)
+    emp_id: String,         // new employee's ID
+    name: String,
+    department: String,
+    role: String,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct AddEmployeeResponse {
+    success: bool,
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct EmployeeListResponse {
+    total: usize,
+    employees: Vec<EmployeeInfoResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct PlatformStatsResponse {
+    total_employees: usize,
+    total_events: usize,
+    total_tasks: usize,
+    total_tasks_done: usize,
+    departments: Vec<DeptStat>,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct DeptStat {
+    name: String,
+    employee_count: usize,
+    task_count: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct DeactivateRequest {
+    admin_emp_id: String,
+    emp_id: String,
+}
+
 // ── Get My Tasks (assigned to me) ────────────
 
 #[get("/tasks/mine/<emp_id>")]
@@ -713,6 +764,206 @@ fn get_all_tasks(state: &State<AppState>) -> Json<TaskListResponse> {
         tasks: tasks.iter().map(task_to_response).collect(),
     })
 }
+// ─────────────────────────────────────────────
+// ADMIN ENDPOINTS (CEO only)
+// ─────────────────────────────────────────────
+
+// ── Add New Employee ─────────────────────────
+
+#[post("/admin/add_employee", format = "json", data = "<request>")]
+fn add_employee(
+    request: Json<AddEmployeeRequest>,
+    state: &State<AppState>,
+) -> Json<AddEmployeeResponse> {
+
+    println!("\n👤 Add employee request from: {}", request.admin_emp_id);
+
+    // Only CEO can add employees
+    match state.registry.get_employee(&request.admin_emp_id) {
+        None => {
+            return Json(AddEmployeeResponse {
+                success: false,
+                message: "❌ Admin not found.".to_string(),
+            });
+        }
+        Some(admin) => {
+            if admin.department.to_str() != "CEO" {
+                return Json(AddEmployeeResponse {
+                    success: false,
+                    message: "❌ Access Denied. Only CEO can add employees.".to_string(),
+                });
+            }
+        }
+    }
+
+    // Parse department
+    let department = match employees::Department::from_str(&request.department) {
+        Some(d) => d,
+        None => {
+            return Json(AddEmployeeResponse {
+                success: false,
+                message: format!(
+                    "❌ Invalid department '{}'. Use: HR, Finance, Legal, Engineering, CEO",
+                    request.department
+                ),
+            });
+        }
+    };
+
+    let now = get_timestamp();
+
+    // Add the employee
+    match state.registry.add_employee(
+        request.emp_id.clone(),
+        request.name.clone(),
+        department.clone(),
+        request.role.clone(),
+        now,
+    ) {
+        Ok(_) => {
+            println!(
+                "  ✅ New employee added: {} ({}) - {}",
+                request.name,
+                request.emp_id,
+                department.to_str()
+            );
+
+            // Record in MORK
+            state.storage.record_event(Event::UserInput {
+                query_id: generate_id(),
+                query_text: format!(
+                    "[ADMIN] New employee added: {} ({}) dept: {}",
+                    request.name,
+                    request.emp_id,
+                    department.to_str()
+                ),
+            }).ok();
+
+            Json(AddEmployeeResponse {
+                success: true,
+                message: format!(
+                    "✅ Employee '{}' added successfully! \
+                    ID: {} | Department: {} | Role: {}",
+                    request.name,
+                    request.emp_id,
+                    department.to_str(),
+                    request.role
+                ),
+            })
+        }
+        Err(e) => Json(AddEmployeeResponse {
+            success: false,
+            message: format!("❌ Failed to add employee: {}", e),
+        }),
+    }
+}
+
+// ── Get All Employees ────────────────────────
+
+#[get("/admin/employees")]
+fn get_all_employees(state: &State<AppState>) -> Json<EmployeeListResponse> {
+
+    let employees = state.registry.get_all_employees();
+    let total = employees.len();
+
+    let list = employees.iter().map(|emp| EmployeeInfoResponse {
+        emp_id:     emp.emp_id.clone(),
+        name:       emp.name.clone(),
+        department: emp.department.to_str().to_string(),
+        role:       emp.role.clone(),
+    }).collect();
+
+    Json(EmployeeListResponse { total, employees: list })
+}
+
+// ── Platform Statistics ──────────────────────
+
+#[get("/admin/stats")]
+fn get_stats(state: &State<AppState>) -> Json<PlatformStatsResponse> {
+
+    println!("\n📊 Stats requested");
+
+    let all_employees = state.registry.get_all_employees();
+    let all_events    = state.storage.get_history();
+    let all_tasks     = state.task_store.get_all_tasks();
+
+    let total_tasks_done = all_tasks.iter()
+        .filter(|t| t.status.to_str() == "Done")
+        .count();
+
+    // Build department stats
+    let dept_names = ["HR", "Finance", "Legal", "Engineering", "CEO"];
+    let departments = dept_names.iter().map(|dept| {
+        let emp_count = all_employees.iter()
+            .filter(|e| e.department.to_str() == *dept)
+            .count();
+        let task_count = all_tasks.iter()
+            .filter(|t| t.department == *dept)
+            .count();
+        DeptStat {
+            name:           dept.to_string(),
+            employee_count: emp_count,
+            task_count,
+        }
+    }).collect();
+
+    Json(PlatformStatsResponse {
+        total_employees: all_employees.len(),
+        total_events:    all_events.len(),
+        total_tasks:     all_tasks.len(),
+        total_tasks_done,
+        departments,
+    })
+}
+
+// ── Deactivate Employee ──────────────────────
+
+#[post("/admin/deactivate", format = "json", data = "<request>")]
+fn deactivate_employee(
+    request: Json<DeactivateRequest>,
+    state: &State<AppState>,
+) -> Json<AddEmployeeResponse> {
+
+    // Only CEO can deactivate
+    match state.registry.get_employee(&request.admin_emp_id) {
+        None => {
+            return Json(AddEmployeeResponse {
+                success: false,
+                message: "❌ Admin not found.".to_string(),
+            });
+        }
+        Some(admin) => {
+            if admin.department.to_str() != "CEO" {
+                return Json(AddEmployeeResponse {
+                    success: false,
+                    message: "❌ Only CEO can deactivate employees.".to_string(),
+                });
+            }
+        }
+    }
+
+    // Can't deactivate yourself
+    if request.emp_id == request.admin_emp_id {
+        return Json(AddEmployeeResponse {
+            success: false,
+            message: "❌ Cannot deactivate yourself.".to_string(),
+        });
+    }
+
+    match state.registry.deactivate_employee(&request.emp_id) {
+        Ok(_) => Json(AddEmployeeResponse {
+            success: true,
+            message: format!(
+                "✅ Employee {} deactivated. They can no longer access the platform.",
+                request.emp_id
+            ),
+        }),
+        Err(e) => Json(AddEmployeeResponse {
+            success: false,
+            message: format!("❌ {}", e),
+        }),
+    }
+}
 
 // ─────────────────────────────────────────────
 // Launch
@@ -728,7 +979,7 @@ fn rocket() -> _ {
 
     let state = AppState {
         storage: StorageLayer::new("workbinder_events.log"),
-        registry: EmployeeRegistry::new(),
+        registry: EmployeeRegistry::new("workbinder_employees.json"),
         task_store: TaskStore::new("workbinder_tasks.json"),
     };
 
@@ -764,5 +1015,9 @@ fn rocket() -> _ {
             get_created_tasks,
             get_department_tasks,
             get_all_tasks,
+            add_employee,
+            get_all_employees,
+            get_stats,
+            deactivate_employee,
         ])
 }

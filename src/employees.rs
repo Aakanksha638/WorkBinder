@@ -1,150 +1,227 @@
 // employees.rs
-// Employee registry — stores employee IDs, names, and departments
-// Think of this as the HR database of who works where
+// Employee registry with dynamic add support
+// Persists to disk so new employees survive restarts
 
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
-// HashMap = a lookup table
-// like a dictionary: "0001" → Employee { name: "Priya", department: "HR" }
+use std::sync::Mutex;
+use std::fs;
 
 // ─────────────────────────────────────────────
 // Department Enum
-// Only these departments exist in the system
 // ─────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-// Debug = can be printed for debugging
-// PartialEq = can be compared with == operator
 pub enum Department {
     HR,
     Finance,
     Legal,
     Engineering,
-    CEO,  // CEO sees everything, always
+    CEO,
 }
 
 impl Department {
-    // Convert a string like "HR" into a Department enum
-    // Called when someone sends their department as text
     pub fn from_str(s: &str) -> Option<Department> {
         match s.to_uppercase().as_str() {
-            "HR" => Some(Department::HR),
-            "FINANCE" => Some(Department::Finance),
-            "LEGAL" => Some(Department::Legal),
+            "HR"          => Some(Department::HR),
+            "FINANCE"     => Some(Department::Finance),
+            "LEGAL"       => Some(Department::Legal),
             "ENGINEERING" => Some(Department::Engineering),
-            "CEO" => Some(Department::CEO),
-            _ => None,  // None = not found, invalid department
+            "CEO"         => Some(Department::CEO),
+            _ => None,
         }
     }
 
-    // Convert Department enum back to a string
-    // Called when we want to display or store it
     pub fn to_str(&self) -> &str {
         match self {
-            Department::HR => "HR",
-            Department::Finance => "Finance",
-            Department::Legal => "Legal",
+            Department::HR          => "HR",
+            Department::Finance     => "Finance",
+            Department::Legal       => "Legal",
             Department::Engineering => "Engineering",
-            Department::CEO => "CEO",
+            Department::CEO         => "CEO",
         }
     }
 }
 
 // ─────────────────────────────────────────────
 // Employee Struct
-// One employee record
 // ─────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Employee {
-    pub emp_id: String,        // "0001"
-    pub name: String,          // "Priya Sharma"
-    pub department: Department, // HR, Finance etc
-    pub role: String,          // "HR Manager", "Finance Assistant" etc
+    pub emp_id:     String,
+    pub name:       String,
+    pub department: Department,
+    pub role:       String,
+    pub is_active:  bool,       // can be deactivated by CEO
+    pub created_at: u128,       // when they were added
 }
 
 // ─────────────────────────────────────────────
 // Employee Registry
-// Holds ALL employees in the system
 // ─────────────────────────────────────────────
 
 pub struct EmployeeRegistry {
-    // HashMap<String, Employee> = lookup table
-    // key = emp_id ("0001")
-    // value = the Employee record
-    employees: HashMap<String, Employee>,
+    employees: Mutex<HashMap<String, Employee>>,
+    file_path: String,
 }
 
 impl EmployeeRegistry {
 
-    // Create registry with hardcoded demo employees
-    // In production this would load from a database
-    pub fn new() -> Self {
-        let mut employees = HashMap::new();
+    // Create registry with default employees
+    // Also loads any previously added employees from disk
+    pub fn new(file_path: &str) -> Self {
+        println!("👥 Loading employee registry...");
 
-        // Helper closure to add employees cleanly
-        // A closure is like a mini function defined inline
-        let mut add = |id: &str, name: &str, dept: Department, role: &str| {
-            employees.insert(id.to_string(), Employee {
-                emp_id: id.to_string(),
-                name: name.to_string(),
+        // Start with default employees
+        let mut default_employees = HashMap::new();
+
+        let defaults = vec![
+            ("0000", "Aakanksha",    Department::CEO,         "CEO & Founder"),
+            ("0001", "Priya Sharma", Department::HR,          "HR Manager"),
+            ("0002", "Rahul Verma",  Department::HR,          "HR Assistant"),
+            ("0003", "Sneha Patil",  Department::Finance,     "Finance Manager"),
+            ("0004", "Amit Kumar",   Department::Finance,     "Finance Assistant"),
+            ("0005", "Vikram Mehta", Department::Legal,       "Legal Manager"),
+            ("0006", "Pooja Singh",  Department::Legal,       "Legal Assistant"),
+            ("0007", "Arjun Nair",   Department::Engineering, "Lead Engineer"),
+            ("0008", "Divya Reddy",  Department::Engineering, "Backend Engineer"),
+        ];
+
+        for (id, name, dept, role) in defaults {
+            default_employees.insert(id.to_string(), Employee {
+                emp_id:     id.to_string(),
+                name:       name.to_string(),
                 department: dept,
-                role: role.to_string(),
+                role:       role.to_string(),
+                is_active:  true,
+                created_at: 0, // default employees have no timestamp
             });
-        };
+        }
 
-        // ── Demo Employees ───────────────────
-        // CEO — sees everything
-        add("0000", "Aakanksha",      Department::CEO,         "CEO & Founder");
+        // Load any dynamically added employees from disk
+        // and merge them with defaults
+        if let Ok(json) = fs::read_to_string(file_path) {
+            if let Ok(saved) = serde_json::from_str::<HashMap<String, Employee>>(&json) {
+                for (id, emp) in saved {
+                    // Only add if not already in defaults
+                    // (prevents overwriting default employees)
+                    if !default_employees.contains_key(&id) {
+                        default_employees.insert(id, emp);
+                    }
+                }
+            }
+        }
 
-        // HR Department
-        add("0001", "Priya Sharma",   Department::HR,          "HR Manager");
-        add("0002", "Rahul Verma",    Department::HR,          "HR Assistant");
+        println!(
+            "  ✅ Registry loaded with {} employees",
+            default_employees.len()
+        );
 
-        // Finance Department
-        add("0003", "Sneha Patil",    Department::Finance,     "Finance Manager");
-        add("0004", "Amit Kumar",     Department::Finance,     "Finance Assistant");
-
-        // Legal Department
-        add("0005", "Vikram Mehta",   Department::Legal,       "Legal Manager");
-        add("0006", "Pooja Singh",    Department::Legal,       "Legal Assistant");
-
-        // Engineering Department
-        add("0007", "Arjun Nair",     Department::Engineering, "Lead Engineer");
-        add("0008", "Divya Reddy",    Department::Engineering, "Backend Engineer");
-
-        println!("👥 Employee Registry loaded with {} employees", employees.len());
-
-        EmployeeRegistry { employees }
+        EmployeeRegistry {
+            employees: Mutex::new(default_employees),
+            file_path: file_path.to_string(),
+        }
     }
 
-    // Look up an employee by their ID
-    // Returns None if employee not found
-    pub fn get_employee(&self, emp_id: &str) -> Option<&Employee> {
-        self.employees.get(emp_id)
+    // Save registry to disk
+    fn save_to_disk(&self) -> Result<(), String> {
+        let employees = self.employees.lock().unwrap();
+        let json = serde_json::to_string_pretty(&*employees)
+            .map_err(|e| format!("Serialize failed: {}", e))?;
+        fs::write(&self.file_path, json)
+            .map_err(|e| format!("Write failed: {}", e))?;
+        Ok(())
     }
 
-    // Check if an employee can access a document
-    // from a specific department
+    // Look up employee by ID
+    pub fn get_employee(&self, emp_id: &str) -> Option<Employee> {
+        let employees = self.employees.lock().unwrap();
+        employees.get(emp_id).cloned()
+    }
+
+    // Check if employee can access a department's documents
     pub fn can_access(&self, emp_id: &str, doc_department: &Department) -> bool {
         match self.get_employee(emp_id) {
-            // Employee not found = no access
             None => false,
-
-            Some(employee) => {
-                // CEO can access EVERYTHING
-                if employee.department == Department::CEO {
-                    return true;
-                }
-
-                // Everyone else can only access their OWN department
-                &employee.department == doc_department
+            Some(emp) => {
+                if !emp.is_active { return false; }
+                if emp.department == Department::CEO { return true; }
+                &emp.department == doc_department
             }
         }
     }
 
-    // Get all employees (for admin dashboard later)
-    pub fn get_all_employees(&self) -> Vec<&Employee> {
-        self.employees.values().collect()
+    // Add a new employee (CEO only action)
+    pub fn add_employee(
+        &self,
+        emp_id: String,
+        name: String,
+        department: Department,
+        role: String,
+        timestamp: u128,
+    ) -> Result<(), String> {
+
+        {
+            let mut employees = self.employees.lock().unwrap();
+
+            // Check if ID already exists
+            if employees.contains_key(&emp_id) {
+                return Err(format!(
+                    "Employee ID '{}' already exists", emp_id
+                ));
+            }
+
+            employees.insert(emp_id.clone(), Employee {
+                emp_id,
+                name,
+                department,
+                role,
+                is_active: true,
+                created_at: timestamp,
+            });
+        }
+
+        self.save_to_disk()
+            .map_err(|e| format!("Save failed: {}", e))?;
+
+        Ok(())
+    }
+
+    // Deactivate an employee (soft delete)
+    pub fn deactivate_employee(&self, emp_id: &str) -> Result<(), String> {
+        let mut employees = self.employees.lock().unwrap();
+
+        match employees.get_mut(emp_id) {
+            None => Err(format!("Employee '{}' not found", emp_id)),
+            Some(emp) => {
+                emp.is_active = false;
+                drop(employees);
+                self.save_to_disk()
+            }
+        }
+    }
+
+    // Get ALL employees as a list
+    pub fn get_all_employees(&self) -> Vec<Employee> {
+        let employees = self.employees.lock().unwrap();
+        let mut list: Vec<Employee> = employees.values().cloned().collect();
+        // Sort by emp_id so display is consistent
+        list.sort_by(|a, b| a.emp_id.cmp(&b.emp_id));
+        list
+    }
+
+    // Get employees by department
+    pub fn get_by_department(&self, dept: &str) -> Vec<Employee> {
+        let employees = self.employees.lock().unwrap();
+        employees.values()
+            .filter(|e| e.department.to_str() == dept && e.is_active)
+            .cloned()
+            .collect()
+    }
+
+    // Get total count
+    pub fn count(&self) -> usize {
+        self.employees.lock().unwrap().len()
     }
 }
