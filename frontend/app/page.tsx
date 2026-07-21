@@ -83,6 +83,7 @@ export default function Home() {
   const [loginError, setLoginError]   = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
 
+
   // ── Tab State ────────────────────────────
 const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history" | "admin">("chat");
   // ── Chat State ───────────────────────────
@@ -117,6 +118,12 @@ const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history"
   const [history, setHistory]         = useState<string[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+
+  // ── Notification State ───────────────────
+  const [unreadCount, setUnreadCount]         = useState(0);
+  const [notifications, setNotifications]     = useState<Notification[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [notifLoading, setNotifLoading]       = useState(false);
 
   // ─────────────────────────────────────────
   // Load tasks when tab opens

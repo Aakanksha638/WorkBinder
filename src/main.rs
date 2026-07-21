@@ -9,12 +9,14 @@ mod storage;
 mod model;
 mod embeddings;
 mod employees;
-mod tasks;      // ← NEW
+mod tasks;  
+mod notifications;    // ← NEW
 
 use events::Event;
 use storage::{StorageLayer, StoredDocument};
 use employees::EmployeeRegistry;
 use tasks::{TaskStore, Task, Priority, TaskStatus};
+use notifications::{NotificationStore, NotificationType};
 
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
@@ -29,7 +31,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 struct AppState {
     storage: StorageLayer,
     registry: EmployeeRegistry,
-    task_store: TaskStore,     // ← NEW
+    task_store: TaskStore,  
+    notification_store: NotificationStore,   // ← NEW
 }
 
 // ─────────────────────────────────────────────
@@ -125,6 +128,43 @@ struct EmployeeInfoResponse {
     role: String,
 }
 
+// ── Notification Shapes ───────────────────────
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct NotificationResponse {
+    notification_id:   String,
+    emp_id:            String,
+    notification_type: String,
+    emoji:             String,
+    title:             String,
+    message:           String,
+    is_read:           bool,
+    created_at:        u128,
+    related_id:        String,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct NotificationListResponse {
+    total:  usize,
+    unread: usize,
+    notifications: Vec<NotificationResponse>,
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct MarkReadRequest {
+    notification_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct UnreadCountResponse {
+    emp_id: String,
+    unread: usize,
+}
+
 // Task request shapes
 #[derive(Deserialize)]
 #[serde(crate = "rocket::serde")]
@@ -190,6 +230,21 @@ fn task_to_response(task: &Task) -> TaskResponse {
         department: task.department.clone(),
         created_at: task.created_at,
         updated_at: task.updated_at,
+    }
+}
+fn notif_to_response(
+    n: &notifications::Notification
+) -> NotificationResponse {
+    NotificationResponse {
+        notification_id:   n.notification_id.clone(),
+        emp_id:            n.emp_id.clone(),
+        notification_type: n.notification_type.to_str().to_string(),
+        emoji:             n.notification_type.emoji().to_string(),
+        title:             n.title.clone(),
+        message:           n.message.clone(),
+        is_read:           n.is_read,
+        created_at:        n.created_at,
+        related_id:        n.related_id.clone(),
     }
 }
 
@@ -407,6 +462,26 @@ async fn add_document(
         uploaded_by: employee.emp_id.clone(),
     }).expect("Failed to save document");
 
+    // Notify all employees in the same department
+    let dept_employees = state.registry.get_by_department(&department);
+    for dept_emp in dept_employees {
+        // Don't notify the uploader themselves
+        if dept_emp.emp_id != employee.emp_id {
+            state.notification_store.create(
+                dept_emp.emp_id.clone(),
+                NotificationType::DocumentAdded,
+                format!("New document in {}", department),
+                format!(
+                    "{} added a new document: '{}'",
+                    employee.name,
+                    request.title
+                ),
+                doc_id.clone(),
+            ).ok();
+        }
+    }
+    println!("  🔔 Department notified about new document");
+
     Json(AddDocumentResponse {
         doc_id: doc_id.clone(),
         department: department.clone(),
@@ -414,7 +489,11 @@ async fn add_document(
             "✅ '{}' saved to {} department! doc_id: {}",
             request.title, department, doc_id
         ),
+
+        
     })
+
+    
 }
 
 // ─────────────────────────────────────────────
@@ -474,6 +553,8 @@ fn create_task(
 ) -> Json<UpdateTaskResponse> {
 
     println!("\n📋 Create task from emp: {}", request.emp_id);
+
+    
 
     // Verify creator exists
     let creator = match state.registry.get_employee(&request.emp_id) {
@@ -545,6 +626,22 @@ fn create_task(
         "  ✅ Task created: {} → assigned to {}",
         request.title, assignee.name
     );
+
+    // Send notification to the assignee
+    state.notification_store.create(
+        assignee.emp_id.clone(),
+        NotificationType::TaskAssigned,
+        format!("New task assigned to you"),
+        format!(
+            "{} assigned you a task: '{}' — Priority: {}",
+            creator.name,
+            request.title,
+            priority.to_str()
+        ),
+        task_id.clone(),
+    ).ok(); // .ok() means ignore error if notification fails
+
+    println!("  🔔 Notification sent to {}", assignee.name);
 
     Json(UpdateTaskResponse {
         success: true,
@@ -630,6 +727,28 @@ fn update_task(
     }).expect("Failed to record TaskUpdated");
 
     println!("  ✅ Task updated: {} → {}", old_status, new_status_str);
+
+    // If task is marked Done, notify the creator
+    if new_status_str == "Done" {
+        if let Some(task) = state.task_store.get_task(&request.task_id) {
+            if let Some(creator) = state.registry.get_employee(&task.created_by) {
+                if let Some(updater) = state.registry.get_employee(&request.emp_id) {
+                    state.notification_store.create(
+                        creator.emp_id.clone(),
+                        NotificationType::TaskCompleted,
+                        format!("Task completed!"),
+                        format!(
+                            "{} completed the task: '{}'",
+                            updater.name,
+                            task.title
+                        ),
+                        request.task_id.clone(),
+                    ).ok();
+                    println!("  🔔 Completion notification sent to {}", creator.name);
+                }
+            }
+        }
+    }
 
     Json(UpdateTaskResponse {
         success: true,
@@ -838,7 +957,19 @@ fn add_employee(
                     department.to_str()
                 ),
             }).ok();
-
+            // Notify CEO about new employee
+            state.notification_store.create(
+                request.admin_emp_id.clone(),
+                NotificationType::NewEmployee,
+                format!("New employee added"),
+                format!(
+                    "Successfully added {} ({}) to {} department",
+                    request.name,
+                    request.emp_id,
+                    request.department
+                ),
+                request.emp_id.clone(),
+            ).ok();
             Json(AddEmployeeResponse {
                 success: true,
                 message: format!(
@@ -964,7 +1095,97 @@ fn deactivate_employee(
         }),
     }
 }
+// ─────────────────────────────────────────────
+// NOTIFICATION ENDPOINTS
+// ─────────────────────────────────────────────
 
+// ── Get My Notifications ─────────────────────
+
+#[get("/notifications/<emp_id>")]
+fn get_notifications(
+    emp_id: String,
+    state: &State<AppState>,
+) -> Json<NotificationListResponse> {
+
+    // Verify employee exists
+    match state.registry.get_employee(&emp_id) {
+        None => Json(NotificationListResponse {
+            total: 0,
+            unread: 0,
+            notifications: vec![],
+        }),
+        Some(_) => {
+            let notifications = state.notification_store
+                .get_for_employee(&emp_id);
+
+            let unread = state.notification_store
+                .get_unread_count(&emp_id);
+
+            let total = notifications.len();
+
+            Json(NotificationListResponse {
+                total,
+                unread,
+                notifications: notifications
+                    .iter()
+                    .map(notif_to_response)
+                    .collect(),
+            })
+        }
+    }
+}
+
+// ── Get Unread Count ─────────────────────────
+// This is polled every 10 seconds by the frontend
+// Lightweight — just returns a number
+
+#[get("/notifications/count/<emp_id>")]
+fn get_unread_count(
+    emp_id: String,
+    state: &State<AppState>,
+) -> Json<UnreadCountResponse> {
+    let unread = state.notification_store.get_unread_count(&emp_id);
+    Json(UnreadCountResponse { emp_id, unread })
+}
+
+// ── Mark One as Read ─────────────────────────
+
+#[post("/notifications/read", format = "json", data = "<request>")]
+fn mark_notification_read(
+    request: Json<MarkReadRequest>,
+    state: &State<AppState>,
+) -> Json<UpdateTaskResponse> {
+    match state.notification_store
+        .mark_as_read(&request.notification_id) {
+        Ok(_) => Json(UpdateTaskResponse {
+            success: true,
+            message: "✅ Notification marked as read".to_string(),
+        }),
+        Err(e) => Json(UpdateTaskResponse {
+            success: false,
+            message: format!("❌ {}", e),
+        }),
+    }
+}
+
+// ── Mark All as Read ─────────────────────────
+
+#[get("/notifications/read_all/<emp_id>")]
+fn mark_all_read(
+    emp_id: String,
+    state: &State<AppState>,
+) -> Json<UpdateTaskResponse> {
+    match state.notification_store.mark_all_read(&emp_id) {
+        Ok(_) => Json(UpdateTaskResponse {
+            success: true,
+            message: "✅ All notifications marked as read".to_string(),
+        }),
+        Err(e) => Json(UpdateTaskResponse {
+            success: false,
+            message: format!("❌ {}", e),
+        }),
+    }
+}
 // ─────────────────────────────────────────────
 // Launch
 // ─────────────────────────────────────────────
@@ -981,6 +1202,7 @@ fn rocket() -> _ {
         storage: StorageLayer::new("workbinder_events.log"),
         registry: EmployeeRegistry::new("workbinder_employees.json"),
         task_store: TaskStore::new("workbinder_tasks.json"),
+        notification_store: NotificationStore::new("workbinder_notifications.json"),
     };
 
     let cors = rocket_cors::CorsOptions {
@@ -1019,5 +1241,9 @@ fn rocket() -> _ {
             get_all_employees,
             get_stats,
             deactivate_employee,
+             get_notifications,        // ← NEW
+            get_unread_count,         // ← NEW
+            mark_notification_read,   // ← NEW
+            mark_all_read, 
         ])
 }
