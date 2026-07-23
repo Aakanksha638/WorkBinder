@@ -34,6 +34,18 @@ interface Message {
   department?: string;
 }
 
+interface Notification {
+  notification_id: string;
+  emp_id: string;
+  notification_type: string;
+  emoji: string;
+  title: string;
+  message: string;
+  is_read: boolean;
+  created_at: number;
+  related_id: string;
+}
+
 // ─────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────
@@ -134,6 +146,81 @@ const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history"
       loadTasks();
     }
   }, [activeTab, employee]);
+
+  // Poll for unread notifications every 10 seconds
+  useEffect(() => {
+    if (!employee) return;
+
+    // Check immediately on login
+    checkUnread();
+
+    // Then check every 10 seconds
+    const interval = setInterval(checkUnread, 10000);
+
+    // Cleanup when component unmounts or user logs out
+    return () => clearInterval(interval);
+  }, [employee]);
+
+  const checkUnread = async () => {
+    if (!employee) return;
+    try {
+      const res = await fetch(
+        `${API}/notifications/count/${employee.emp_id}`
+      );
+      const data = await res.json();
+      setUnreadCount(data.unread);
+    } catch {
+      // silently fail — don't disrupt the app
+    }
+  };
+
+  const loadNotifications = async () => {
+    if (!employee) return;
+    setNotifLoading(true);
+    try {
+      const res = await fetch(
+        `${API}/notifications/${employee.emp_id}`
+      );
+      const data = await res.json();
+      setNotifications(data.notifications || []);
+      setUnreadCount(data.unread);
+    } catch {
+      console.error("Failed to load notifications");
+    }
+    setNotifLoading(false);
+  };
+
+  const handleMarkRead = async (notification_id: string) => {
+    try {
+      await fetch(`${API}/notifications/read`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notification_id }),
+      });
+      // Update local state immediately
+      setNotifications(prev =>
+        prev.map(n =>
+          n.notification_id === notification_id
+            ? { ...n, is_read: true }
+            : n
+        )
+      );
+      setUnreadCount(prev => Math.max(0, prev - 1));
+    } catch {
+      console.error("Failed to mark as read");
+    }
+  };
+
+  const handleMarkAllRead = async () => {
+    if (!employee) return;
+    try {
+      await fetch(`${API}/notifications/read_all/${employee.emp_id}`);
+      setNotifications(prev => prev.map(n => ({ ...n, is_read: true })));
+      setUnreadCount(0);
+    } catch {
+      console.error("Failed to mark all as read");
+    }
+  };
 
   // ─────────────────────────────────────────
   // Login
