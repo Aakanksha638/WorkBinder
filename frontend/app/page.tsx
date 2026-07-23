@@ -222,6 +222,7 @@ const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history"
     }
   };
 
+
   // ─────────────────────────────────────────
   // Login
   // ─────────────────────────────────────────
@@ -652,6 +653,121 @@ const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history"
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <h1 className="text-2xl font-bold text-blue-400">WorkBindr</h1>
           <div className="flex items-center gap-3">
+
+            {/* Notification Bell */}
+            <div className="relative">
+              <button
+                onClick={() => {
+                  setShowNotifications(!showNotifications);
+                  if (!showNotifications) loadNotifications();
+                }}
+                className="relative bg-gray-800 hover:bg-gray-700
+                           text-white p-2 rounded-xl transition-colors"
+              >
+                🔔
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1 -right-1
+                                   bg-red-500 text-white text-xs
+                                   w-5 h-5 rounded-full flex items-center
+                                   justify-center font-bold">
+                    {unreadCount > 9 ? "9+" : unreadCount}
+                  </span>
+                )}
+              </button>
+
+              {/* Notification Dropdown */}
+              {showNotifications && (
+                <div className="absolute right-0 top-12 w-96 bg-gray-900
+                                border border-gray-700 rounded-2xl shadow-2xl
+                                z-50 max-h-96 overflow-hidden">
+
+                  {/* Header */}
+                  <div className="flex items-center justify-between
+                                  p-4 border-b border-gray-800">
+                    <h3 className="text-white font-semibold">
+                      🔔 Notifications
+                      {unreadCount > 0 && (
+                        <span className="ml-2 bg-red-500 text-white
+                                         text-xs px-2 py-0.5 rounded-full">
+                          {unreadCount} new
+                        </span>
+                      )}
+                    </h3>
+                    <div className="flex gap-2">
+                      {unreadCount > 0 && (
+                        <button
+                          onClick={handleMarkAllRead}
+                          className="text-blue-400 text-xs hover:text-blue-300"
+                        >
+                          Mark all read
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setShowNotifications(false)}
+                        className="text-gray-500 hover:text-gray-300 text-sm"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Notification List */}
+                  <div className="overflow-y-auto max-h-72">
+                    {notifLoading ? (
+                      <p className="text-gray-500 text-sm text-center p-4">
+                        Loading...
+                      </p>
+                    ) : notifications.length === 0 ? (
+                      <p className="text-gray-500 text-sm text-center p-8">
+                        No notifications yet 🎉
+                      </p>
+                    ) : (
+                      notifications.map((notif) => (
+                        <div
+                          key={notif.notification_id}
+                          onClick={() => handleMarkRead(notif.notification_id)}
+                          className={`p-4 border-b border-gray-800
+                                     cursor-pointer transition-colors
+                                     hover:bg-gray-800 ${
+                            !notif.is_read
+                              ? "bg-gray-800/50 border-l-2 border-l-blue-500"
+                              : ""
+                          }`}
+                        >
+                          <div className="flex items-start gap-3">
+                            <span className="text-xl">{notif.emoji}</span>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between">
+                                <p className={`text-sm font-medium ${
+                                  !notif.is_read
+                                    ? "text-white"
+                                    : "text-gray-400"
+                                }`}>
+                                  {notif.title}
+                                </p>
+                                {!notif.is_read && (
+                                  <span className="w-2 h-2 bg-blue-500
+                                                   rounded-full ml-2
+                                                   flex-shrink-0" />
+                                )}
+                              </div>
+                              <p className="text-gray-400 text-xs mt-0.5
+                                           leading-relaxed">
+                                {notif.message}
+                              </p>
+                              <p className="text-gray-600 text-xs mt-1">
+                                {new Date(notif.created_at).toLocaleString()}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className={`${deptColor} px-3 py-1 rounded-full
                             text-xs font-semibold`}>
               {deptIcon} {employee.department}
