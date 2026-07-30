@@ -47,4 +47,13 @@ pub enum Event {
         new_status: String,
         updated_by: String,
     },
+
+    // ── Chat Events ───────────────────────────
+    // Someone sent a direct message
+    MessageSent {
+        message_id:  String,
+        from_emp_id: String,
+        to_emp_id:   String,
+        department:  String,
+    },
 }

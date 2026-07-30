@@ -263,6 +263,31 @@ impl StorageLayer {
 
                 println!("  ✅ Task update recorded in MORK");
             }
+
+            // ── MessageSent ──────────────────
+            Event::MessageSent {
+                message_id,
+                from_emp_id,
+                to_emp_id,
+                department,
+            } => {
+                println!("💬 Processing MessageSent event...");
+
+                let log_entry = format!(
+                    "[{}] EVENT: MessageSent | msg_id: {} | \
+                    from: {} → to: {} | dept: {}",
+                    timestamp,
+                    message_id,
+                    from_emp_id,
+                    to_emp_id,
+                    department
+                );
+
+                self.mork.append(&log_entry)
+                    .map_err(|e| format!("MORK write failed: {}", e))?;
+
+                println!("  ✅ Message recorded in MORK");
+            }
         }
 
         Ok(())

@@ -11,12 +11,14 @@ mod embeddings;
 mod employees;
 mod tasks;  
 mod notifications;    // ← NEW
+mod chat;
 
 use events::Event;
 use storage::{StorageLayer, StoredDocument};
 use employees::EmployeeRegistry;
 use tasks::{TaskStore, Task, Priority, TaskStatus};
 use notifications::{NotificationStore, NotificationType};
+use chat::ChatStore;
 
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
@@ -32,7 +34,8 @@ struct AppState {
     storage: StorageLayer,
     registry: EmployeeRegistry,
     task_store: TaskStore,  
-    notification_store: NotificationStore,   // ← NEW
+    notification_store: NotificationStore, 
+    chat_store:         ChatStore,  // ← NEW
 }
 
 // ─────────────────────────────────────────────
@@ -215,6 +218,53 @@ struct TaskListResponse {
     tasks: Vec<TaskResponse>,
 }
 
+// ── Chat Shapes ───────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct SendMessageRequest {
+    from_emp_id: String,
+    to_emp_id:   String,
+    content:     String,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct MessageResponse {
+    message_id:  String,
+    from_emp_id: String,
+    to_emp_id:   String,
+    content:     String,
+    department:  String,
+    is_read:     bool,
+    created_at:  u128,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct ConversationResponse {
+    emp_a:    String,
+    emp_b:    String,
+    messages: Vec<MessageResponse>,
+    unread:   usize,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct DeptMemberResponse {
+    emp_id:     String,
+    name:       String,
+    role:       String,
+    unread:     usize,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct DeptMembersResponse {
+    department: String,
+    members:    Vec<DeptMemberResponse>,
+}
+
 // Helper to convert Task to TaskResponse
 fn task_to_response(task: &Task) -> TaskResponse {
     TaskResponse {
@@ -245,6 +295,18 @@ fn notif_to_response(
         is_read:           n.is_read,
         created_at:        n.created_at,
         related_id:        n.related_id.clone(),
+    }
+}
+
+fn msg_to_response(m: &chat::Message) -> MessageResponse {
+    MessageResponse {
+        message_id:  m.message_id.clone(),
+        from_emp_id: m.from_emp_id.clone(),
+        to_emp_id:   m.to_emp_id.clone(),
+        content:     m.content.clone(),
+        department:  m.department.clone(),
+        is_read:     m.is_read,
+        created_at:  m.created_at,
     }
 }
 
@@ -1185,6 +1247,208 @@ fn mark_all_read(
             message: format!("❌ {}", e),
         }),
     }
+}
+
+// ─────────────────────────────────────────────
+// CHAT ENDPOINTS
+// ─────────────────────────────────────────────
+
+// ── Get Department Members to Chat With ───────
+
+#[get("/chat/members/<emp_id>")]
+fn get_dept_members(
+    emp_id: String,
+    state:  &State<AppState>,
+) -> Json<DeptMembersResponse> {
+
+    println!("\n👥 Get dept members for chat: {}", emp_id);
+
+    // Verify employee exists
+    let employee = match state.registry.get_employee(&emp_id) {
+        None => {
+            return Json(DeptMembersResponse {
+                department: "Unknown".to_string(),
+                members:    vec![],
+            });
+        }
+        Some(e) => e,
+    };
+
+    let department = employee.department.to_str().to_string();
+
+    // Get all employees in same department
+    let dept_employees = state.registry.get_by_department(&department);
+
+    let members = dept_employees
+        .iter()
+        .filter(|e| e.emp_id != emp_id) // exclude self
+        .map(|e| {
+            let unread = state.chat_store.get_unread_from(
+                &e.emp_id,
+                &emp_id,
+            );
+            DeptMemberResponse {
+                emp_id: e.emp_id.clone(),
+                name:   e.name.clone(),
+                role:   e.role.clone(),
+                unread,
+            }
+        })
+        .collect();
+
+    Json(DeptMembersResponse { department, members })
+}
+
+// ── Send a Message ────────────────────────────
+
+#[post("/chat/send", format = "json", data = "<request>")]
+fn send_message(
+    request: Json<SendMessageRequest>,
+    state:   &State<AppState>,
+) -> Json<UpdateTaskResponse> {
+
+    println!("\n💬 Message from {} to {}",
+        request.from_emp_id, request.to_emp_id);
+
+    // Verify sender exists
+    let sender = match state.registry.get_employee(&request.from_emp_id) {
+        None => {
+            return Json(UpdateTaskResponse {
+                success: false,
+                message: format!(
+                    "❌ Sender '{}' not found.",
+                    request.from_emp_id
+                ),
+            });
+        }
+        Some(e) => e,
+    };
+
+    // Verify receiver exists
+    let receiver = match state.registry.get_employee(&request.to_emp_id) {
+        None => {
+            return Json(UpdateTaskResponse {
+                success: false,
+                message: format!(
+                    "❌ Receiver '{}' not found.",
+                    request.to_emp_id
+                ),
+            });
+        }
+        Some(e) => e,
+    };
+
+    // Department check — same department only
+    // CEO can message anyone
+    if sender.department.to_str() != "CEO"
+        && sender.department.to_str() != receiver.department.to_str()
+    {
+        return Json(UpdateTaskResponse {
+            success: false,
+            message: format!(
+                "❌ You can only message employees in your \
+                department ({}). {} is in {}.",
+                sender.department.to_str(),
+                receiver.name,
+                receiver.department.to_str()
+            ),
+        });
+    }
+
+    // Content validation
+    if request.content.trim().is_empty() {
+        return Json(UpdateTaskResponse {
+            success: false,
+            message: "❌ Message cannot be empty.".to_string(),
+        });
+    }
+
+    let department = sender.department.to_str().to_string();
+
+    // Save the message
+    let message = match state.chat_store.send_message(
+        request.from_emp_id.clone(),
+        request.to_emp_id.clone(),
+        request.content.trim().to_string(),
+        department.clone(),
+    ) {
+        Ok(msg) => msg,
+        Err(e) => {
+            return Json(UpdateTaskResponse {
+                success: false,
+                message: format!("❌ Failed to save message: {}", e),
+            });
+        }
+    };
+
+    // Record in MORK permanently
+    state.storage.record_event(Event::MessageSent {
+        message_id:  message.message_id.clone(),
+        from_emp_id: sender.emp_id.clone(),
+        to_emp_id:   receiver.emp_id.clone(),
+        department:  department.clone(),
+    }).expect("Failed to record MessageSent");
+
+    // Send notification to receiver
+    state.notification_store.create(
+        receiver.emp_id.clone(),
+        NotificationType::TaskAssigned, // reusing for now
+        format!("New message from {}", sender.name),
+        format!(
+            "{}: {}",
+            sender.name,
+            &request.content[..request.content.len().min(50)]
+        ),
+        message.message_id.clone(),
+    ).ok();
+
+    println!(
+        "  ✅ Message sent: {} → {}",
+        sender.name, receiver.name
+    );
+
+    Json(UpdateTaskResponse {
+        success: true,
+        message: "✅ Message sent!".to_string(),
+    })
+}
+
+// ── Get Conversation ──────────────────────────
+
+#[get("/chat/conversation/<emp_a>/<emp_b>")]
+fn get_conversation(
+    emp_a:  String,
+    emp_b:  String,
+    state:  &State<AppState>,
+) -> Json<ConversationResponse> {
+
+    println!("\n💬 Get conversation: {} ↔ {}", emp_a, emp_b);
+
+    // Mark messages as read when conversation is opened
+    state.chat_store
+        .mark_conversation_read(&emp_a, &emp_b)
+        .ok();
+
+    let messages = state.chat_store.get_conversation(&emp_a, &emp_b);
+    let unread   = state.chat_store.get_unread_from(&emp_b, &emp_a);
+
+    Json(ConversationResponse {
+        emp_a:    emp_a.clone(),
+        emp_b:    emp_b.clone(),
+        messages: messages.iter().map(msg_to_response).collect(),
+        unread,
+    })
+}
+
+// ── Get Total Unread Count ────────────────────
+
+#[get("/chat/unread/<emp_id>")]
+fn get_chat_unread(
+    emp_id: String,
+    state:  &State<AppState>,
+) -> Json<UnreadCountResponse> {
+    let unread = state.chat_store.get_unread_count(&emp_id);
+    Json(UnreadCountResponse { emp_id, unread })
 }
 // ─────────────────────────────────────────────
 // Launch
