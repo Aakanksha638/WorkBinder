@@ -131,6 +131,31 @@ struct EmployeeInfoResponse {
     role: String,
 }
 
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct SearchRequest {
+    emp_id: String,
+    query:  String,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct SearchResult {
+    doc_id:     String,
+    title:      String,
+    department: String,
+    snippet:    String,   // first 200 chars of content
+    relevance:  f32,      // similarity score
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct SearchResponse {
+    query:   String,
+    results: Vec<SearchResult>,
+    total:   usize,
+}
+
 // ── Notification Shapes ───────────────────────
 
 #[derive(Serialize)]
@@ -1450,6 +1475,145 @@ fn get_chat_unread(
     let unread = state.chat_store.get_unread_count(&emp_id);
     Json(UnreadCountResponse { emp_id, unread })
 }
+
+// ── Analytics Shapes ─────────────────────────
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct AnalyticsResponse {
+    // Task stats
+    tasks_todo:        usize,
+    tasks_in_progress: usize,
+    tasks_done:        usize,
+    tasks_urgent:      usize,
+
+    // Department activity
+    dept_stats: Vec<DeptActivityStat>,
+
+    // Platform overview
+    total_messages:    usize,
+    total_documents:   usize,
+    total_ai_queries:  usize,
+    total_employees:   usize,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct DeptActivityStat {
+    department:  String,
+    employees:   usize,
+    tasks:       usize,
+    tasks_done:  usize,
+    documents:   usize,
+}
+
+// ─────────────────────────────────────────────
+// DOCUMENT SEARCH ENDPOINT
+// ─────────────────────────────────────────────
+
+#[post("/search", format = "json", data = "<request>")]
+async fn search_documents(
+    request: Json<SearchRequest>,
+    state:   &State<AppState>,
+) -> Json<SearchResponse> {
+
+    println!("\n🔍 Search: '{}' by emp: {}", request.query, request.emp_id);
+
+    // Verify employee
+    let employee = match state.registry.get_employee(&request.emp_id) {
+        None => {
+            return Json(SearchResponse {
+                query:   request.query.clone(),
+                results: vec![],
+                total:   0,
+            });
+        }
+        Some(e) => e,
+    };
+
+    // Get query embedding for semantic search
+    let query_embedding = match embeddings::get_embedding(
+        &request.query,
+        "search_query"
+    ).await {
+        Ok(emb) => emb,
+        Err(_)  => vec![],
+    };
+
+    let all_docs = state.storage.doc_store.get_all();
+
+    let mut results: Vec<SearchResult> = all_docs
+        .iter()
+        .filter(|doc| {
+            // Permission filter
+            match employees::Department::from_str(&doc.department) {
+                Some(dept) => state.registry.can_access(
+                    &employee.emp_id, &dept
+                ),
+                None => false,
+            }
+        })
+        .filter_map(|doc| {
+            // Semantic similarity if embedding available
+            let relevance = if !query_embedding.is_empty()
+                && !doc.embedding.is_empty()
+            {
+                embeddings::cosine_similarity(
+                    &query_embedding,
+                    &doc.embedding
+                )
+            } else {
+                // Fallback: keyword search
+                // Check if query words appear in content
+                let query_lower   = request.query.to_lowercase();
+                let content_lower = doc.content.to_lowercase();
+                let title_lower   = doc.title.to_lowercase();
+
+                if content_lower.contains(&query_lower)
+                    || title_lower.contains(&query_lower)
+                {
+                    0.5 // decent match
+                } else {
+                    0.0 // no match
+                }
+            };
+
+            // Only include results with some relevance
+            if relevance > 0.1 {
+                // Create a snippet (first 200 chars)
+                let snippet = if doc.content.len() > 200 {
+                    format!("{}...", &doc.content[..200])
+                } else {
+                    doc.content.clone()
+                };
+
+                Some(SearchResult {
+                    doc_id:     doc.doc_id.clone(),
+                    title:      doc.title.clone(),
+                    department: doc.department.clone(),
+                    snippet,
+                    relevance,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort by relevance (highest first)
+    results.sort_by(|a, b|
+        b.relevance.partial_cmp(&a.relevance).unwrap()
+    );
+
+    let total = results.len();
+    println!("  ✅ Found {} results", total);
+
+    Json(SearchResponse {
+        query: request.query.clone(),
+        results,
+        total,
+    })
+}
 // ─────────────────────────────────────────────
 // Launch
 // ─────────────────────────────────────────────
@@ -1510,4 +1674,78 @@ fn rocket() -> _ {
             mark_notification_read,   // ← NEW
             mark_all_read, 
         ])
+}
+
+// ─────────────────────────────────────────────
+// ANALYTICS ENDPOINT
+// ─────────────────────────────────────────────
+
+#[get("/analytics/<emp_id>")]
+fn get_analytics(
+    emp_id: String,
+    state:  &State<AppState>,
+) -> Json<AnalyticsResponse> {
+
+    println!("\n📊 Analytics requested by: {}", emp_id);
+
+    let all_tasks     = state.task_store.get_all_tasks();
+    let all_employees = state.registry.get_all_employees();
+    let all_events    = state.storage.get_history();
+    let all_docs      = state.storage.doc_store.get_all();
+
+    // Task status counts
+    let tasks_todo = all_tasks.iter()
+        .filter(|t| t.status.to_str() == "Todo").count();
+    let tasks_in_progress = all_tasks.iter()
+        .filter(|t| t.status.to_str() == "InProgress").count();
+    let tasks_done = all_tasks.iter()
+        .filter(|t| t.status.to_str() == "Done").count();
+    let tasks_urgent = all_tasks.iter()
+        .filter(|t| t.priority.to_str() == "Urgent").count();
+
+    // Count AI queries from MORK log
+    let total_ai_queries = all_events.iter()
+        .filter(|e| e.contains("EVENT: UserInput")).count();
+
+    // Count messages from MORK log
+    let total_messages = all_events.iter()
+        .filter(|e| e.contains("EVENT: MessageSent")).count();
+
+    // Department stats
+    let dept_names = ["HR", "Finance", "Legal", "Engineering", "CEO"];
+    let dept_stats = dept_names.iter().map(|dept| {
+        let employees = all_employees.iter()
+            .filter(|e| e.department.to_str() == *dept)
+            .count();
+        let tasks = all_tasks.iter()
+            .filter(|t| t.department == *dept)
+            .count();
+        let tasks_done_count = all_tasks.iter()
+            .filter(|t| t.department == *dept
+                && t.status.to_str() == "Done")
+            .count();
+        let documents = all_docs.iter()
+            .filter(|d| d.department == *dept)
+            .count();
+
+        DeptActivityStat {
+            department: dept.to_string(),
+            employees,
+            tasks,
+            tasks_done: tasks_done_count,
+            documents,
+        }
+    }).collect();
+
+    Json(AnalyticsResponse {
+        tasks_todo,
+        tasks_in_progress,
+        tasks_done,
+        tasks_urgent,
+        dept_stats,
+        total_messages,
+        total_documents: all_docs.len(),
+        total_ai_queries,
+        total_employees: all_employees.len(),
+    })
 }
