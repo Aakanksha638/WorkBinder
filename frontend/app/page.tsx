@@ -97,7 +97,8 @@ export default function Home() {
 
 
   // ── Tab State ────────────────────────────
-const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history" | "admin" | "messages">("chat");
+const [activeTab, setActiveTab] = useState "chat" | "tasks" | "docs" | "history" | "admin" | "messages" | "analytics" | "search"
+>("chat");
   // ── Chat State ───────────────────────────
   const [messages, setMessages]       = useState<Message[]>([]);
   const [question, setQuestion]       = useState("");
@@ -136,6 +137,46 @@ const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history"
   const [notifications, setNotifications]     = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifLoading, setNotifLoading]       = useState(false);
+
+  // ── Analytics State ──────────────────────
+  interface Analytics {
+    tasks_todo: number;
+    tasks_in_progress: number;
+    tasks_done: number;
+    tasks_urgent: number;
+    total_messages: number;
+    total_documents: number;
+    total_ai_queries: number;
+    total_employees: number;
+    dept_stats: Array<{
+      department: string;
+      employees: number;
+      tasks: number;
+      tasks_done: number;
+      documents: number;
+    }>;
+  }
+  const [analytics, setAnalytics]           = useState<Analytics | null>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+
+  // ── Search State ─────────────────────────
+  interface SearchResult {
+    doc_id: string;
+    title: string;
+    department: string;
+    snippet: string;
+    relevance: number;
+  }
+  const [searchQuery, setSearchQuery]       = useState("");
+  const [searchResults, setSearchResults]   = useState<SearchResult[]>([]);
+  const [searchLoading, setSearchLoading]   = useState(false);
+  const [searchDone, setSearchDone]         = useState(false);
+
+  // ── File Upload State ────────────────────
+  const [fileTitle, setFileTitle]           = useState("");
+  const [fileResult, setFileResult]         = useState("");
+  const [fileLoading, setFileLoading]       = useState(false);
+  const [dragOver, setDragOver]             = useState(false);
 
   // ─────────────────────────────────────────
   // Load tasks when tab opens
@@ -549,6 +590,90 @@ const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history"
   };
 
   // ─────────────────────────────────────────
+  // Load Analytics
+  // ─────────────────────────────────────────
+
+  const loadAnalytics = async () => {
+    if (!employee) return;
+    setAnalyticsLoading(true);
+    try {
+      const res  = await fetch(`${API}/analytics/${employee.emp_id}`);
+      const data = await res.json();
+      setAnalytics(data);
+    } catch {
+      console.error("Failed to load analytics");
+    }
+    setAnalyticsLoading(false);
+  };
+
+  // ─────────────────────────────────────────
+  // Search Documents
+  // ─────────────────────────────────────────
+
+  const handleSearch = async () => {
+    if (!searchQuery.trim() || !employee) return;
+    setSearchLoading(true);
+    setSearchDone(false);
+
+    try {
+      const res = await fetch(`${API}/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          emp_id: employee.emp_id,
+          query:  searchQuery,
+        }),
+      });
+      const data = await res.json();
+      setSearchResults(data.results || []);
+      setSearchDone(true);
+    } catch {
+      console.error("Search failed");
+    }
+    setSearchLoading(false);
+  };
+
+  // ─────────────────────────────────────────
+  // File Upload
+  // ─────────────────────────────────────────
+
+  const handleFileUpload = async (file: File) => {
+    if (!employee || !fileTitle.trim()) {
+      setFileResult("❌ Please enter a title first.");
+      return;
+    }
+
+    setFileLoading(true);
+    setFileResult("");
+
+    try {
+      // Read file as text
+      const text = await file.text();
+      const fileType = file.name.split(".").pop()?.toLowerCase() || "txt";
+
+      const res = await fetch(`${API}/upload_file`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          emp_id:    employee.emp_id,
+          title:     fileTitle,
+          file_name: file.name,
+          file_type: fileType,
+          content:   text,
+        }),
+      });
+
+      const data = await res.json();
+      setFileResult(data.message);
+      if (data.doc_id !== "none") setFileTitle("");
+
+    } catch {
+      setFileResult("❌ Upload failed. Try again.");
+    }
+    setFileLoading(false);
+  };
+
+  // ─────────────────────────────────────────
   // RENDER — Login Screen
   // ─────────────────────────────────────────
 
@@ -796,10 +921,13 @@ const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history"
         <div className="max-w-6xl mx-auto px-6">
           <div className="flex gap-1">
             {[
-              { id: "chat",    label: "🤖 AI Chat" },
-              { id: "tasks",   label: "📋 Tasks" },
-              { id: "docs",    label: "📄 Documents" },
-              { id: "history", label: "📚 MORK History" },
+              { id: "chat",      label: "🤖 AI Chat" },
+              { id: "tasks",     label: "📋 Tasks" },
+              { id: "messages",  label: `💬 Messages${chatUnread > 0 ? ` (${chatUnread})` : ""}` },
+              { id: "search",    label: "🔍 Search" },
+              { id: "docs",      label: "📄 Documents" },
+              { id: "analytics", label: "📊 Analytics" },
+              { id: "history",   label: "📚 History" },
               ...(employee.department === "CEO"
                 ? [{ id: "admin", label: "👑 Admin" }]
                 : []),
@@ -1932,4 +2060,419 @@ function AdminPanel({ employee }: { employee: Employee }) {
           </div>
         )}
 }
+{/* ════════════════════════════════
+            TAB: MESSAGES
+        ════════════════════════════════ */}
+        {activeTab === "messages" && (
+          <div className="flex h-[calc(100vh-220px)] gap-4">
+
+            {/* ── Left Sidebar: Department Members ── */}
+            <div className="w-72 bg-gray-900 rounded-2xl border
+                            border-gray-800 flex flex-col overflow-hidden">
+
+              <div className="p-4 border-b border-gray-800">
+                <h3 className="text-white font-semibold text-sm">
+                  💬 {employee.department} Team
+                </h3>
+                <p className="text-gray-500 text-xs mt-0.5">
+                  Direct messages
+                </p>
+              </div>
+
+              <div className="flex-1 overflow-y-auto">
+                {chatLoading ? (
+                  <p className="text-gray-500 text-xs text-center p-4">
+                    Loading...
+                  </p>
+                ) : deptMembers.length === 0 ? (
+                  <p className="text-gray-600 text-xs text-center p-4">
+                    No other employees in your department yet.
+                  </p>
+                ) : (
+                  deptMembers.map((member) => (
+                    <div
+                      key={member.emp_id}
+                      onClick={() => loadConversation(member)}
+                      className={`flex items-center gap-3 p-4 cursor-pointer
+                                 transition-colors border-b border-gray-800
+                                 hover:bg-gray-800 ${
+                        selectedPeer?.emp_id === member.emp_id
+                          ? "bg-gray-800 border-l-2 border-l-blue-500"
+                          : ""
+                      }`}
+                    >
+                      {/* Avatar */}
+                      <div className={`w-9 h-9 rounded-full flex items-center
+                                      justify-center text-sm font-bold
+                                      ${deptColors[employee.department] || "bg-gray-600"}`}>
+                        {member.name.charAt(0)}
+                      </div>
+
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between">
+                          <p className="text-white text-sm font-medium truncate">
+                            {member.name}
+                          </p>
+                          {member.unread > 0 && (
+                            <span className="bg-blue-500 text-white text-xs
+                                             w-5 h-5 rounded-full flex items-center
+                                             justify-center flex-shrink-0 ml-1">
+                              {member.unread}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-gray-500 text-xs truncate">
+                          {member.role}
+                        </p>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* ── Right: Conversation Area ── */}
+            <div className="flex-1 bg-gray-900 rounded-2xl border
+                            border-gray-800 flex flex-col overflow-hidden">
+
+              {!selectedPeer ? (
+                // No conversation selected
+                <div className="flex-1 flex items-center justify-center">
+                  <div className="text-center">
+                    <div className="text-4xl mb-3">💬</div>
+                    <p className="text-gray-400 font-medium">
+                      Select a colleague to start chatting
+                    </p>
+                    <p className="text-gray-600 text-sm mt-1">
+                      Messages are department-scoped and recorded in MORK
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {/* Conversation Header */}
+                  <div className="p-4 border-b border-gray-800
+                                  flex items-center gap-3">
+                    <div className={`w-9 h-9 rounded-full flex items-center
+                                    justify-center text-sm font-bold
+                                    ${deptColors[employee.department] || "bg-gray-600"}`}>
+                      {selectedPeer.name.charAt(0)}
+                    </div>
+                    <div>
+                      <p className="text-white font-semibold text-sm">
+                        {selectedPeer.name}
+                      </p>
+                      <p className="text-gray-500 text-xs">
+                        {selectedPeer.role} • {employee.department}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => loadConversation(selectedPeer)}
+                      className="ml-auto text-gray-500 hover:text-gray-300
+                                 text-xs bg-gray-800 px-3 py-1.5 rounded-lg
+                                 transition-colors"
+                    >
+                      🔄 Refresh
+                    </button>
+                  </div>
+
+                  {/* Messages */}
+                  <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                    {conversation.length === 0 ? (
+                      <div className="flex items-center justify-center h-full">
+                        <p className="text-gray-600 text-sm">
+                          No messages yet. Say hello! 👋
+                        </p>
+                      </div>
+                    ) : (
+                      conversation.map((msg) => {
+                        const isMe = msg.from_emp_id === employee.emp_id;
+                        return (
+                          <div
+                            key={msg.message_id}
+                            className={`flex ${isMe ? "justify-end" : "justify-start"}`}
+                          >
+                            <div className={`max-w-[70%] ${isMe ? "items-end" : "items-start"} flex flex-col`}>
+                              <div className={`rounded-2xl px-4 py-2.5 ${
+                                isMe
+                                  ? "bg-blue-600 text-white rounded-br-sm"
+                                  : "bg-gray-800 text-gray-100 rounded-bl-sm"
+                              }`}>
+                                <p className="text-sm leading-relaxed">
+                                  {msg.content}
+                                </p>
+                              </div>
+                              <p className="text-gray-600 text-xs mt-1 px-1">
+                                {new Date(msg.created_at).toLocaleTimeString(
+                                  [], { hour: "2-digit", minute: "2-digit" }
+                                )}
+                                {isMe && (
+                                  <span className="ml-1">
+                                    {msg.is_read ? " ✓✓" : " ✓"}
+                                  </span>
+                                )}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {/* Message Input */}
+                  <div className="p-4 border-t border-gray-800">
+                    <div className="flex gap-3">
+                      <input
+                        type="text"
+                        value={newMessage}
+                        onChange={(e) => setNewMessage(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault();
+                            handleSendMessage();
+                          }
+                        }}
+                        placeholder={`Message ${selectedPeer.name}...`}
+                        className="flex-1 bg-gray-800 text-white rounded-xl
+                                   px-4 py-3 border border-gray-700
+                                   focus:outline-none focus:border-blue-500
+                                   placeholder-gray-500 text-sm"
+                      />
+                      <button
+                        onClick={handleSendMessage}
+                        disabled={sendingMsg || !newMessage.trim()}
+                        className="bg-blue-600 hover:bg-blue-500
+                                   disabled:bg-gray-700 disabled:cursor-not-allowed
+                                   text-white font-semibold px-5 py-3
+                                   rounded-xl transition-colors text-sm"
+                      >
+                        {sendingMsg ? "..." : "Send"}
+                      </button>
+                    </div>
+                    <p className="text-gray-600 text-xs mt-2">
+                      Press Enter to send • Messages recorded in MORK permanently
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+{/* ════════════════════════════════
+            TAB: ANALYTICS
+        ════════════════════════════════ */}
+        {activeTab === "analytics" && (
+          <div>
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-2xl font-bold text-white">
+                📊 Analytics Dashboard
+              </h2>
+              <button
+                onClick={loadAnalytics}
+                className="bg-gray-800 hover:bg-gray-700 text-gray-400
+                           px-4 py-2 rounded-xl text-sm transition-colors"
+              >
+                🔄 Refresh
+              </button>
+            </div>
+
+            {analyticsLoading ? (
+              <div className="text-gray-500 text-center py-12">
+                Loading analytics...
+              </div>
+            ) : analytics ? (
+              <div className="space-y-6">
+
+                {/* ── Top Stats Row ── */}
+                <div className="grid grid-cols-4 gap-4">
+                  {[
+                    { label: "Employees",   value: analytics.total_employees,  icon: "👥", color: "border-blue-500" },
+                    { label: "AI Queries",  value: analytics.total_ai_queries, icon: "🤖", color: "border-purple-500" },
+                    { label: "Documents",   value: analytics.total_documents,  icon: "📄", color: "border-yellow-500" },
+                    { label: "Messages",    value: analytics.total_messages,   icon: "💬", color: "border-green-500" },
+                  ].map((stat) => (
+                    <div key={stat.label}
+                      className={`bg-gray-900 rounded-2xl p-5
+                                 border border-gray-800 border-l-4
+                                 ${stat.color}`}>
+                      <div className="text-2xl mb-2">{stat.icon}</div>
+                      <div className="text-3xl font-bold text-white">
+                        {stat.value}
+                      </div>
+                      <div className="text-gray-400 text-sm mt-1">
+                        {stat.label}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* ── Task Status Row ── */}
+                <div className="bg-gray-900 rounded-2xl p-6
+                                border border-gray-800">
+                  <h3 className="text-white font-semibold mb-4">
+                    📋 Task Overview
+                  </h3>
+
+                  {/* Visual progress bars */}
+                  <div className="space-y-4">
+                    {[
+                      {
+                        label: "Todo",
+                        value: analytics.tasks_todo,
+                        color: "bg-gray-500",
+                        emoji: "📋",
+                      },
+                      {
+                        label: "In Progress",
+                        value: analytics.tasks_in_progress,
+                        color: "bg-blue-500",
+                        emoji: "⚙️",
+                      },
+                      {
+                        label: "Done",
+                        value: analytics.tasks_done,
+                        color: "bg-green-500",
+                        emoji: "✅",
+                      },
+                      {
+                        label: "Urgent",
+                        value: analytics.tasks_urgent,
+                        color: "bg-red-500",
+                        emoji: "🚨",
+                      },
+                    ].map((item) => {
+                      const total = analytics.tasks_todo
+                        + analytics.tasks_in_progress
+                        + analytics.tasks_done;
+                      const pct = total > 0
+                        ? Math.round((item.value / total) * 100)
+                        : 0;
+
+                      return (
+                        <div key={item.label}>
+                          <div className="flex justify-between
+                                          text-sm mb-1">
+                            <span className="text-gray-400">
+                              {item.emoji} {item.label}
+                            </span>
+                            <span className="text-white font-medium">
+                              {item.value}
+                              <span className="text-gray-500 ml-1">
+                                ({pct}%)
+                              </span>
+                            </span>
+                          </div>
+                          <div className="h-2 bg-gray-800 rounded-full">
+                            <div
+                              className={`h-2 ${item.color} rounded-full
+                                         transition-all duration-500`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Completion rate */}
+                  {(analytics.tasks_todo
+                    + analytics.tasks_in_progress
+                    + analytics.tasks_done) > 0 && (
+                    <div className="mt-4 pt-4 border-t border-gray-800">
+                      <p className="text-gray-400 text-sm">
+                        Completion Rate:
+                        <span className="text-green-400 font-bold ml-2 text-lg">
+                          {Math.round(
+                            (analytics.tasks_done /
+                              (analytics.tasks_todo
+                                + analytics.tasks_in_progress
+                                + analytics.tasks_done)) * 100
+                          )}%
+                        </span>
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Department Activity Table ── */}
+                <div className="bg-gray-900 rounded-2xl p-6
+                                border border-gray-800">
+                  <h3 className="text-white font-semibold mb-4">
+                    🏢 Department Activity
+                  </h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b border-gray-800">
+                          {["Department", "Employees", "Tasks", "Done", "Documents", "Completion"].map((h) => (
+                            <th key={h}
+                              className="text-left p-3 text-gray-400
+                                         text-xs font-medium">
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {analytics.dept_stats
+                          .filter(d => d.employees > 0)
+                          .map((dept) => {
+                            const completionPct = dept.tasks > 0
+                              ? Math.round((dept.tasks_done / dept.tasks) * 100)
+                              : 0;
+                            return (
+                              <tr key={dept.department}
+                                className="border-b border-gray-800
+                                           hover:bg-gray-800 transition-colors">
+                                <td className="p-3">
+                                  <span className={`${deptColors[dept.department] || "bg-gray-600"}
+                                                    text-white px-2 py-0.5
+                                                    rounded-full text-xs`}>
+                                    {dept.department}
+                                  </span>
+                                </td>
+                                <td className="p-3 text-white text-sm">
+                                  {dept.employees}
+                                </td>
+                                <td className="p-3 text-white text-sm">
+                                  {dept.tasks}
+                                </td>
+                                <td className="p-3 text-green-400 text-sm">
+                                  {dept.tasks_done}
+                                </td>
+                                <td className="p-3 text-white text-sm">
+                                  {dept.documents}
+                                </td>
+                                <td className="p-3">
+                                  <div className="flex items-center gap-2">
+                                    <div className="flex-1 h-1.5
+                                                    bg-gray-700 rounded-full">
+                                      <div
+                                        className="h-1.5 bg-green-500
+                                                   rounded-full"
+                                        style={{ width: `${completionPct}%` }}
+                                      />
+                                    </div>
+                                    <span className="text-gray-400 text-xs
+                                                     w-8">
+                                      {completionPct}%
+                                    </span>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+              </div>
+            ) : (
+              <p className="text-gray-500 text-center py-8">
+                No data yet. Start using the platform to see analytics!
+              </p>
+            )}
+          </div>
+        )}
 
