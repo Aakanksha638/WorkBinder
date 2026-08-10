@@ -335,6 +335,7 @@ fn msg_to_response(m: &chat::Message) -> MessageResponse {
     }
 }
 
+
 // ─────────────────────────────────────────────
 // Endpoint 1: Homepage
 // ─────────────────────────────────────────────
@@ -645,7 +646,7 @@ fn create_task(
 
     // Verify creator exists
     let creator = match state.registry.get_employee(&request.emp_id) {
-        Some(emp) => emp.clone(),
+        Some(emp) => emp. clone(),
         None => {
             return Json(UpdateTaskResponse {
                 success: false,
@@ -1626,11 +1627,12 @@ fn rocket() -> _ {
 
     dotenvy::dotenv().ok();
 
-    let state = AppState {
-        storage: StorageLayer::new("workbinder_events.log"),
-        registry: EmployeeRegistry::new("workbinder_employees.json"),
-        task_store: TaskStore::new("workbinder_tasks.json"),
+   let state = AppState {
+        storage:            StorageLayer::new("workbinder_events.log"),
+        registry:           EmployeeRegistry::new("workbinder_employees.json"),
+        task_store:         TaskStore::new("workbinder_tasks.json"),
         notification_store: NotificationStore::new("workbinder_notifications.json"),
+        chat_store:         ChatStore::new("workbinder_chat.json"),
     };
 
     let cors = rocket_cors::CorsOptions {
@@ -1669,10 +1671,14 @@ fn rocket() -> _ {
             get_all_employees,
             get_stats,
             deactivate_employee,
-             get_notifications,        // ← NEW
+            get_notifications,        // ← NEW
             get_unread_count,         // ← NEW
             mark_notification_read,   // ← NEW
             mark_all_read, 
+            get_dept_members,
+            send_message,
+            get_conversation,
+            get_chat_unread,
         ])
 }
 

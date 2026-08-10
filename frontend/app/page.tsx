@@ -97,8 +97,7 @@ export default function Home() {
 
 
   // ── Tab State ────────────────────────────
-const [activeTab, setActiveTab] = useState "chat" | "tasks" | "docs" | "history" | "admin" | "messages" | "analytics" | "search"
->("chat");
+const [activeTab, setActiveTab] = useState<"chat" | "tasks" | "docs" | "history" | "admin" | "messages">("chat");
   // ── Chat State ───────────────────────────
   const [messages, setMessages]       = useState<Message[]>([]);
   const [question, setQuestion]       = useState("");
@@ -158,6 +157,32 @@ const [activeTab, setActiveTab] = useState "chat" | "tasks" | "docs" | "history"
   }
   const [analytics, setAnalytics]           = useState<Analytics | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
+
+// ── Chat/Messages State ──────────────────
+  interface DeptMember {
+    emp_id: string;
+    name: string;
+    role: string;
+    unread: number;
+  }
+
+  interface ChatMessage {
+    message_id: string;
+    from_emp_id: string;
+    to_emp_id: string;
+    content: string;
+    department: string;
+    is_read: boolean;
+    created_at: number;
+  }
+
+  const [deptMembers, setDeptMembers]         = useState<DeptMember[]>([]);
+  const [selectedPeer, setSelectedPeer]       = useState<DeptMember | null>(null);
+  const [conversation, setConversation]       = useState<ChatMessage[]>([]);
+  const [newMessage, setNewMessage]           = useState("");
+  const [chatLoading, setChatLoading]         = useState(false);
+  const [sendingMsg, setSendingMsg]           = useState(false);
+  const [chatUnread, setChatUnread]           = useState(0);
 
   // ── Search State ─────────────────────────
   interface SearchResult {
@@ -935,7 +960,7 @@ const [activeTab, setActiveTab] = useState "chat" | "tasks" | "docs" | "history"
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(
-                  tab.id as "chat" | "tasks" | "docs" | "history" | "admin"
+                  tab.id as "chat" | "tasks" | "docs" | "history" | "admin" | "messages"
                 )}
                 
                 className={`px-4 py-3 text-sm font-medium transition-colors
@@ -1860,6 +1885,83 @@ function AdminPanel({ employee }: { employee: Employee }) {
       )}
     </div>
   );
+  // ─────────────────────────────────────────
+  // Load Department Members
+  // ─────────────────────────────────────────
+
+  const loadDeptMembers = async () => {
+    if (!employee) return;
+    setChatLoading(true);
+    try {
+      const res  = await fetch(`${API}/chat/members/${employee.emp_id}`);
+      const data = await res.json();
+      setDeptMembers(data.members || []);
+    } catch {
+      console.error("Failed to load dept members");
+    }
+    setChatLoading(false);
+  };
+
+  // ─────────────────────────────────────────
+  // Load Conversation
+  // ─────────────────────────────────────────
+
+  const loadConversation = async (peer: DeptMember) => {
+    if (!employee) return;
+    setSelectedPeer(peer);
+    try {
+      const res  = await fetch(
+        `${API}/chat/conversation/${employee.emp_id}/${peer.emp_id}`
+      );
+      const data = await res.json();
+      setConversation(data.messages || []);
+      // Update unread count for this peer
+      setDeptMembers(prev =>
+        prev.map(m =>
+          m.emp_id === peer.emp_id ? { ...m, unread: 0 } : m
+        )
+      );
+    } catch {
+      console.error("Failed to load conversation");
+    }
+  };
+
+  // ─────────────────────────────────────────
+  // Send Message
+  // ─────────────────────────────────────────
+
+  const handleSendMessage = async () => {
+    if (!newMessage.trim() || !employee || !selectedPeer) return;
+    setSendingMsg(true);
+
+    try {
+      const res = await fetch(`${API}/chat/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_emp_id: employee.emp_id,
+          to_emp_id:   selectedPeer.emp_id,
+          content:     newMessage.trim(),
+        }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        setNewMessage("");
+        // Reload conversation to show new message
+        await loadConversation(selectedPeer);
+      }
+    } catch {
+      console.error("Failed to send message");
+    }
+    setSendingMsg(false);
+  };
+
+  useEffect(() => {
+    if (activeTab === "messages" && employee) {
+      loadDeptMembers();
+    }
+  }, [activeTab, employee]);
 
   {/* ════════════════════════════════
             TAB: MESSAGES
