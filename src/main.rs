@@ -12,6 +12,7 @@ mod employees;
 mod tasks;  
 mod notifications;    // ← NEW
 mod chat;
+mod auth;
 
 use events::Event;
 use storage::{StorageLayer, StoredDocument};
@@ -19,6 +20,7 @@ use employees::EmployeeRegistry;
 use tasks::{TaskStore, Task, Priority, TaskStatus};
 use notifications::{NotificationStore, NotificationType};
 use chat::ChatStore;
+use auth::AuthStore;
 
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
@@ -35,7 +37,8 @@ struct AppState {
     registry: EmployeeRegistry,
     task_store: TaskStore,  
     notification_store: NotificationStore, 
-    chat_store:         ChatStore,  // ← NEW
+    chat_store:         ChatStore,
+    auth_store:         AuthStore,  // ← NEW
 }
 
 // ─────────────────────────────────────────────
