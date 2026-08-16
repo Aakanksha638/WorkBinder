@@ -209,7 +209,7 @@ struct CreateTaskRequest {
 
 #[derive(Serialize)]
 #[serde(crate = "rocket::serde")]
-struct TaskResponse {
+struct TaskResponse { 
     task_id: String,
     title: String,
     description: String,
@@ -336,6 +336,43 @@ fn msg_to_response(m: &chat::Message) -> MessageResponse {
         is_read:     m.is_read,
         created_at:  m.created_at,
     }
+}
+
+// ── Auth Shapes ───────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct LoginRequest {
+    emp_id:   String,
+    password: String,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct LoginResponse {
+    success:    bool,
+    token:      String,
+    emp_id:     String,
+    name:       String,
+    department: String,
+    role:       String,
+    message:    String,
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct ChangePasswordRequest {
+    emp_id:       String,
+    old_password: String,
+    new_password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct CreateAccountRequest {
+    admin_emp_id: String,
+    emp_id:       String,
+    password:     String,
 }
 
 
@@ -747,6 +784,8 @@ fn create_task(
         ),
     })
 }
+
+
 
 // ── Update Task Status ───────────────────────
 
