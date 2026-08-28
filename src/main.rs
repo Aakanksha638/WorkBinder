@@ -375,6 +375,22 @@ struct CreateAccountRequest {
     password:     String,
 }
 
+// Verify JWT token from Authorization header
+// Returns emp_id if valid, error if not
+fn verify_auth(
+    token:      &str,
+    auth_store: &AuthStore,
+) -> Result<auth::Claims, String> {
+
+    // Token comes as "Bearer <token>"
+    // Strip the "Bearer " prefix
+    let token = token
+        .strip_prefix("Bearer ")
+        .unwrap_or(token);
+
+    auth_store.verify_token(token)
+}
+
 
 // ─────────────────────────────────────────────
 // Endpoint 1: Homepage
@@ -1669,12 +1685,16 @@ fn rocket() -> _ {
 
     dotenvy::dotenv().ok();
 
+       let jwt_secret = std::env::var("JWT_SECRET")
+        .unwrap_or_else(|_| "default_secret_change_me".to_string());
+
    let state = AppState {
         storage:            StorageLayer::new("workbinder_events.log"),
         registry:           EmployeeRegistry::new("workbinder_employees.json"),
         task_store:         TaskStore::new("workbinder_tasks.json"),
         notification_store: NotificationStore::new("workbinder_notifications.json"),
         chat_store:         ChatStore::new("workbinder_chat.json"),
+        auth_store:         AuthStore::new("workbinder_auth.json", &jwt_secret),
     };
 
     let cors = rocket_cors::CorsOptions {
