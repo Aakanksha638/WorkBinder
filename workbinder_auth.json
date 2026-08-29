@@ -1,0 +1,56 @@
+{
+  "0007": {
+    "emp_id": "0007",
+    "password_hash": "$2b$12$WwZrrjcYb.3h5LAwLEBRz.Knf9xptYsDPtwVGW8PGgaWKAHHyX4ku",
+    "created_at": 1788012318494,
+    "last_login": null
+  },
+  "0003": {
+    "emp_id": "0003",
+    "password_hash": "$2b$12$19QzfeizH2qZ/fjgv1Bzv.ohhJwjsKGEqOYVncqbRUBcTOOEfooay",
+    "created_at": 1788012315331,
+    "last_login": null
+  },
+  "0004": {
+    "emp_id": "0004",
+    "password_hash": "$2b$12$y4f.mtES2Vf1DlWGPqPPA.UfcEtut7CEuO84F6pWYrBmqRLbF9v8i",
+    "created_at": 1788012316140,
+    "last_login": null
+  },
+  "0006": {
+    "emp_id": "0006",
+    "password_hash": "$2b$12$vG1vA4J7oOtwCf7Wh9EjdecsdkNPXlZb.cwTz6g.qKA5li8Xf3kjq",
+    "created_at": 1788012317731,
+    "last_login": null
+  },
+  "0000": {
+    "emp_id": "0000",
+    "password_hash": "$2b$12$O08BGhaqrlL.CWtcvGeqxeOBhUEfKaRop6jIf6HeFOrHLE./zANPu",
+    "created_at": 1788012312997,
+    "last_login": null
+  },
+  "0005": {
+    "emp_id": "0005",
+    "password_hash": "$2b$12$jPRaqNTuKzRrbUVmyvDXk./LAtUo0WMwbq0biigAjS9OaQ05eZwo.",
+    "created_at": 1788012316997,
+    "last_login": null
+  },
+  "0001": {
+    "emp_id": "0001",
+    "password_hash": "$2b$12$S7YtmmL7D51N7KPSk4OVZeRuON0CN1iSTJOSx7YhDLM4oINs.haSC",
+    "created_at": 1788012313800,
+    "last_login": 1788016506382
+  },
+  "0008": {
+    "emp_id": "0008",
+    "password_hash": "$2b$12$Q0SVQWLJm7xMppHli.cuuOU52TprgSCrhawuDIyZz/vD9eZ6IwfVG",
+    "created_at": 1788012319233,
+    "last_login": null
+  },
+  "0002": {
+    "emp_id": "0002",
+    "password_hash": "$2b$12$5SUVz6JzUZY4FxsCd8hQdOvVuYA0VTG19K95dk6tVl9mBHCYpaOBe",
+    "created_at": 1788012314586,
+    "last_login": null
+  }
+}

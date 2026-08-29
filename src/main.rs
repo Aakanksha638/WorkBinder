@@ -340,40 +340,6 @@ fn msg_to_response(m: &chat::Message) -> MessageResponse {
 
 // ── Auth Shapes ───────────────────────────────
 
-#[derive(Deserialize)]
-#[serde(crate = "rocket::serde")]
-struct LoginRequest {
-    emp_id:   String,
-    password: String,
-}
-
-#[derive(Serialize)]
-#[serde(crate = "rocket::serde")]
-struct LoginResponse {
-    success:    bool,
-    token:      String,
-    emp_id:     String,
-    name:       String,
-    department: String,
-    role:       String,
-    message:    String,
-}
-
-#[derive(Deserialize)]
-#[serde(crate = "rocket::serde")]
-struct ChangePasswordRequest {
-    emp_id:       String,
-    old_password: String,
-    new_password: String,
-}
-
-#[derive(Deserialize)]
-#[serde(crate = "rocket::serde")]
-struct CreateAccountRequest {
-    admin_emp_id: String,
-    emp_id:       String,
-    password:     String,
-}
 
 // Verify JWT token from Authorization header
 // Returns emp_id if valid, error if not
@@ -1566,6 +1532,61 @@ struct DeptActivityStat {
     documents:   usize,
 }
 
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct LoginRequest {
+    emp_id:   String,
+    password: String,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct LoginResponse {
+    success:    bool,
+    token:      String,
+    emp_id:     String,
+    name:       String,
+    department: String,
+    role:       String,
+    message:    String,
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct ChangePasswordRequest {
+    emp_id:       String,
+    old_password: String,
+    new_password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct CreateAccountRequest {
+    admin_emp_id: String,
+    emp_id:       String,
+    password:     String,
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct FileUploadRequest {
+    emp_id:    String,
+    title:     String,
+    file_name: String,
+    file_type: String,
+    content:   String,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct FileUploadResponse {
+    doc_id:     String,
+    title:      String,
+    file_name:  String,
+    department: String,
+    message:    String,
+}
+
 // ─────────────────────────────────────────────
 // DOCUMENT SEARCH ENDPOINT
 // ─────────────────────────────────────────────
@@ -1741,6 +1762,13 @@ fn rocket() -> _ {
             send_message,
             get_conversation,
             get_chat_unread,
+            get_analytics,
+            search_documents,
+            upload_file,
+            login,              // ← must be here
+            verify_token,       // ← must be here
+            change_password,    // ← must be here
+            create_account,
         ])
 }
 
@@ -1816,4 +1844,249 @@ fn get_analytics(
         total_ai_queries,
         total_employees: all_employees.len(),
     })
+}
+
+// ─────────────────────────────────────────────
+// FILE UPLOAD ENDPOINT
+// ─────────────────────────────────────────────
+
+#[post("/upload_file", format = "json", data = "<request>")]
+async fn upload_file(
+    request: Json<FileUploadRequest>,
+    state:   &State<AppState>,
+) -> Json<FileUploadResponse> {
+
+    let doc_id = generate_id();
+    println!("\n📎 File upload from emp: {}", request.emp_id);
+
+    let employee = match state.registry.get_employee(&request.emp_id) {
+        None => {
+            return Json(FileUploadResponse {
+                doc_id:     "none".to_string(),
+                title:      request.title.clone(),
+                file_name:  request.file_name.clone(),
+                department: "none".to_string(),
+                message:    format!("❌ Employee '{}' not found.", request.emp_id),
+            });
+        }
+        Some(e) => e,
+    };
+
+    let department = employee.department.to_str().to_string();
+
+    let text_content = match request.file_type.as_str() {
+        "txt" | "md" | "csv" => request.content.clone(),
+        _ => format!(
+            "[{}] {}: {}",
+            request.file_type.to_uppercase(),
+            request.file_name,
+            request.content
+        ),
+    };
+
+    state.storage.record_event(Event::DocumentAdded {
+        doc_id: doc_id.clone(),
+        content: format!(
+            "FILE: {} | TYPE: {} | DEPT: {} | BY: {} | CONTENT: {}",
+            request.file_name,
+            request.file_type,
+            department,
+            employee.name,
+            text_content
+        ),
+    }).expect("Failed to record file upload");
+
+    let embedding = match embeddings::get_embedding(
+        &text_content, "search_document"
+    ).await {
+        Ok(emb) => emb,
+        Err(e)  => { println!("  ⚠️ Embedding failed: {}", e); vec![] }
+    };
+
+    state.storage.doc_store.add_document(
+        storage::StoredDocument {
+            doc_id:      doc_id.clone(),
+            title:       format!("{} ({})", request.title, request.file_name),
+            content:     text_content,
+            embedding,
+            department:  department.clone(),
+            uploaded_by: employee.emp_id.clone(),
+        }
+    ).expect("Failed to save file");
+
+    let dept_employees = state.registry.get_by_department(&department);
+    for dept_emp in dept_employees {
+        if dept_emp.emp_id != employee.emp_id {
+            state.notification_store.create(
+                dept_emp.emp_id.clone(),
+                NotificationType::DocumentAdded,
+                format!("New file in {}", department),
+                format!("{} uploaded: {}", employee.name, request.file_name),
+                doc_id.clone(),
+            ).ok();
+        }
+    }
+
+    println!("  ✅ File uploaded: {} [{}]", request.file_name, department);
+
+    Json(FileUploadResponse {
+        doc_id: doc_id.clone(),
+        title: request.title.clone(),
+        file_name: request.file_name.clone(),
+        department: department.clone(),
+        message: format!(
+            "✅ File '{}' uploaded to {} department! doc_id: {}",
+            request.file_name, department, doc_id
+        ),
+    })
+}
+
+// ─────────────────────────────────────────────
+// AUTH ENDPOINTS
+// ─────────────────────────────────────────────
+
+#[post("/auth/login", format = "json", data = "<request>")]
+fn login(
+    request: Json<LoginRequest>,
+    state:   &State<AppState>,
+) -> Json<LoginResponse> {
+
+    println!("\n🔐 Login attempt: {}", request.emp_id);
+
+    let employee = match state.registry.get_employee(&request.emp_id) {
+        None => {
+            return Json(LoginResponse {
+                success:    false,
+                token:      String::new(),
+                emp_id:     request.emp_id.clone(),
+                name:       String::new(),
+                department: String::new(),
+                role:       String::new(),
+                message:    format!("❌ Employee ID '{}' not found.", request.emp_id),
+            });
+        }
+        Some(e) => e,
+    };
+
+    match state.auth_store.login(
+        &request.emp_id,
+        &request.password,
+        employee.department.to_str(),
+    ) {
+        Ok(token) => {
+            println!("  ✅ {} logged in successfully", employee.name);
+            Json(LoginResponse {
+                success:    true,
+                token,
+                emp_id:     employee.emp_id.clone(),
+                name:       employee.name.clone(),
+                department: employee.department.to_str().to_string(),
+                role:       employee.role.clone(),
+                message:    format!("Welcome back, {}!", employee.name),
+            })
+        }
+        Err(e) => {
+            println!("  ❌ Login failed: {}", e);
+            Json(LoginResponse {
+                success:    false,
+                token:      String::new(),
+                emp_id:     request.emp_id.clone(),
+                name:       String::new(),
+                department: String::new(),
+                role:       String::new(),
+                message:    format!("❌ {}", e),
+            })
+        }
+    }
+}
+
+// ─────────────────────────────────────────────
+
+#[get("/auth/verify/<token>")]
+fn verify_token(
+    token: String,
+    state: &State<AppState>,
+) -> Json<serde_json::Value> {
+    match state.auth_store.verify_token(&token) {
+        Ok(claims) => Json(serde_json::json!({
+            "valid":      true,
+            "emp_id":     claims.emp_id,
+            "department": claims.department,
+        })),
+        Err(_) => Json(serde_json::json!({
+            "valid": false,
+        })),
+    }
+}
+
+// ─────────────────────────────────────────────
+
+#[post("/auth/change_password", format = "json", data = "<request>")]
+fn change_password(
+    request: Json<ChangePasswordRequest>,
+    state:   &State<AppState>,
+) -> Json<UpdateTaskResponse> {
+
+    println!("\n🔑 Password change for: {}", request.emp_id);
+
+    match state.auth_store.change_password(
+        &request.emp_id,
+        &request.old_password,
+        &request.new_password,
+    ) {
+        Ok(_) => {
+            println!("  ✅ Password changed successfully");
+            Json(UpdateTaskResponse {
+                success: true,
+                message: "✅ Password changed successfully!".to_string(),
+            })
+        }
+        Err(e) => Json(UpdateTaskResponse {
+            success: false,
+            message: format!("❌ {}", e),
+        }),
+    }
+}
+
+// ─────────────────────────────────────────────
+
+#[post("/auth/create_account", format = "json", data = "<request>")]
+fn create_account(
+    request: Json<CreateAccountRequest>,
+    state:   &State<AppState>,
+) -> Json<UpdateTaskResponse> {
+
+    match state.registry.get_employee(&request.admin_emp_id) {
+        None => {
+            return Json(UpdateTaskResponse {
+                success: false,
+                message: "❌ Admin not found.".to_string(),
+            });
+        }
+        Some(admin) => {
+            if admin.department.to_str() != "CEO" {
+                return Json(UpdateTaskResponse {
+                    success: false,
+                    message: "❌ Only CEO can create accounts.".to_string(),
+                });
+            }
+        }
+    }
+
+    match state.auth_store.create_account(
+        request.emp_id.clone(),
+        request.password.clone(),
+    ) {
+        Ok(_) => Json(UpdateTaskResponse {
+            success: true,
+            message: format!(
+                "✅ Account created for employee {}",
+                request.emp_id
+            ),
+        }),
+        Err(e) => Json(UpdateTaskResponse {
+            success: false,
+            message: format!("❌ {}", e),
+        }),
+    }
 }
