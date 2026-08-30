@@ -13,6 +13,8 @@ mod tasks;
 mod notifications;    // ← NEW
 mod chat;
 mod auth;
+mod errors;
+mod logger;
 
 use events::Event;
 use storage::{StorageLayer, StoredDocument};
@@ -27,6 +29,8 @@ use rocket::serde::{Deserialize, Serialize};
 use rocket::State;
 
 use std::time::{SystemTime, UNIX_EPOCH};
+use logger::Logger;
+use errors::{WorkBindrError, ApiResult, require_field, validate_emp_id, validate_password, validate_content_length};
 
 // ─────────────────────────────────────────────
 // Shared Application State
@@ -38,7 +42,8 @@ struct AppState {
     task_store: TaskStore,  
     notification_store: NotificationStore, 
     chat_store:         ChatStore,
-    auth_store:         AuthStore,  // ← NEW
+    auth_store:         AuthStore, 
+    logger:             Logger,  // ← NEW
 }
 
 // ─────────────────────────────────────────────
@@ -413,29 +418,29 @@ fn get_employee(
 #[post("/query", format = "json", data = "<request>")]
 async fn query(
     request: Json<QueryRequest>,
-    state: &State<AppState>,
-) -> Json<QueryResponseBody> {
+    state:   &State<AppState>,
+) -> Result<Json<QueryResponseBody>, WorkBindrError> {
+
+    // ── Validate inputs ───────────────────────
+    validate_emp_id(&request.emp_id)?;
+    require_field(&request.query_text, "query_text")?;
+    validate_content_length(&request.query_text, 2000, "query_text")?;
 
     let query_id = generate_id();
-    println!("\n📨 Query from emp: {}", request.emp_id);
 
-    // Verify employee
-    let employee = match state.registry.get_employee(&request.emp_id) {
-        Some(emp) => emp.clone(),
-        None => {
-            return Json(QueryResponseBody {
-                query_id,
-                emp_id: request.emp_id.clone(),
-                department: "Unknown".to_string(),
-                message: format!(
-                    "❌ Employee ID '{}' not found.",
-                    request.emp_id
-                ),
-            });
-        }
-    };
+    state.logger.info(
+        "QUERY",
+        &format!("New query from emp: {}", request.emp_id)
+    );
 
-    // Record in MORK
+    // ── Verify employee ───────────────────────
+    let employee = state.registry
+        .get_employee(&request.emp_id)
+        .ok_or_else(|| WorkBindrError::EmployeeNotFound(
+            request.emp_id.clone()
+        ))?;
+
+    // ── Record in MORK ────────────────────────
     state.storage.record_event(Event::UserInput {
         query_id: query_id.clone(),
         query_text: format!(
@@ -444,24 +449,38 @@ async fn query(
             employee.department.to_str(),
             request.query_text
         ),
-    }).expect("Failed to record UserInput");
+    }).map_err(|e| {
+        state.logger.log_api_error("query", &request.emp_id, &e);
+        WorkBindrError::MorkWriteFailed(e)
+    })?;
 
-    // Get embedding
+    // ── Get embedding ─────────────────────────
     let query_embedding = match embeddings::get_embedding(
         &request.query_text, "search_query"
     ).await {
         Ok(emb) => emb,
-        Err(_) => vec![],
+        Err(e) => {
+            // Embedding failure is non-fatal
+            // We fall back to general knowledge
+            state.logger.warn(
+                "EMBEDDING",
+                &format!("Embedding failed for query {}: {}", query_id, e)
+            );
+            vec![]
+        }
     };
 
-    // Search with permission filter
+    // ── Search with permission filter ─────────
+    let mut found_doc = false;
+    let mut best_similarity = 0.0f32;
+
     let best_match = if !query_embedding.is_empty() {
         let docs = state.storage.doc_store.get_all();
-        docs.iter()
+        let result = docs.iter()
             .filter(|doc| {
                 match employees::Department::from_str(&doc.department) {
-                    Some(doc_dept) => state.registry.can_access(
-                        &employee.emp_id, &doc_dept
+                    Some(dept) => state.registry.can_access(
+                        &employee.emp_id, &dept
                     ),
                     None => false,
                 }
@@ -473,15 +492,28 @@ async fn query(
                 );
                 (doc.title.clone(), doc.content.clone(), doc.department.clone(), sim)
             })
-            .max_by(|a, b| a.3.partial_cmp(&b.3).unwrap())
+            .max_by(|a, b| a.3.partial_cmp(&b.3).unwrap());
+
+        if let Some((_, _, _, sim)) = &result {
+            best_similarity = *sim;
+            found_doc = *sim > 0.3;
+        }
+        result
     } else {
         None
     };
 
-    // Build prompt
+    // ── Log AI query ──────────────────────────
+    state.logger.log_ai_query(
+        &employee.emp_id,
+        &query_id,
+        found_doc,
+        best_similarity
+    );
+
+    // ── Build prompt ──────────────────────────
     let final_prompt = match &best_match {
         Some((title, content, dept, sim)) if *sim > 0.3 => {
-            println!("  📄 Using doc: '{}' [{}] ({:.2})", title, dept, sim);
             format!(
                 "You are WorkBindr AI assistant.\n\
                 Employee: {} ({})\n\
@@ -489,37 +521,48 @@ async fn query(
                 Content: {}\n\
                 Question: {}\n\
                 Answer based on the document.",
-                employee.name, employee.department.to_str(),
-                title, content, request.query_text
+                employee.name,
+                employee.department.to_str(),
+                title, content,
+                request.query_text
             )
         }
-        _ => {
-            println!("  ℹ️  No matching doc found");
+        _ => format!(
+            "You are WorkBindr AI. Answer this from {} in {} dept: {}",
+            employee.name,
+            employee.department.to_str(),
+            request.query_text
+        ),
+    };
+
+    // ── Ask AI ────────────────────────────────
+    let ai_answer = model::ask_ai(&final_prompt)
+        .await
+        .unwrap_or_else(|e| {
+            // AI failure is non-fatal — return graceful message
+            state.logger.error(
+                "AI",
+                "AI service failed",
+                &e
+            );
             format!(
-                "You are WorkBindr AI. Answer this from {} in {} dept: {}",
-                employee.name, employee.department.to_str(), request.query_text
+                "I'm temporarily unable to process your request. \
+                Please try again in a moment."
             )
-        }
-    };
+        });
 
-    // Ask AI
-    let ai_answer = match model::ask_ai(&final_prompt).await {
-        Ok(a) => a,
-        Err(e) => format!("Error: {}", e),
-    };
-
-    // Record response
+    // ── Record response ───────────────────────
     state.storage.record_event(Event::QueryResponse {
         query_id: query_id.clone(),
         response_text: ai_answer.clone(),
-    }).expect("Failed to record QueryResponse");
+    }).map_err(|e| WorkBindrError::MorkWriteFailed(e))?;
 
-    Json(QueryResponseBody {
+    Ok(Json(QueryResponseBody {
         query_id,
-        emp_id: employee.emp_id,
+        emp_id:     employee.emp_id,
         department: employee.department.to_str().to_string(),
-        message: ai_answer,
-    })
+        message:    ai_answer,
+    }))
 }
 
 // ─────────────────────────────────────────────
@@ -529,81 +572,90 @@ async fn query(
 #[post("/add_document", format = "json", data = "<request>")]
 async fn add_document(
     request: Json<AddDocumentRequest>,
-    state: &State<AppState>,
-) -> Json<AddDocumentResponse> {
+    state:   &State<AppState>,
+) -> Result<Json<AddDocumentResponse>, WorkBindrError> {
+
+    // ── Validate inputs ───────────────────────
+    validate_emp_id(&request.emp_id)?;
+    require_field(&request.title, "title")?;
+    require_field(&request.content, "content")?;
+    validate_content_length(&request.title, 200, "title")?;
+    validate_content_length(&request.content, 50000, "content")?;
 
     let doc_id = generate_id();
-    println!("\n📄 Add document from emp: {}", request.emp_id);
 
-    let employee = match state.registry.get_employee(&request.emp_id) {
-        Some(emp) => emp.clone(),
-        None => {
-            return Json(AddDocumentResponse {
-                doc_id: "none".to_string(),
-                department: "none".to_string(),
-                message: format!("❌ Employee '{}' not found.", request.emp_id),
-            });
-        }
-    };
+    // ── Verify employee ───────────────────────
+    let employee = state.registry
+        .get_employee(&request.emp_id)
+        .ok_or_else(|| WorkBindrError::EmployeeNotFound(
+            request.emp_id.clone()
+        ))?;
 
     let department = employee.department.to_str().to_string();
 
+    // ── Record in MORK ────────────────────────
     state.storage.record_event(Event::DocumentAdded {
         doc_id: doc_id.clone(),
         content: format!(
             "TITLE: {} | DEPT: {} | BY: {} | CONTENT: {}",
             request.title, department, employee.name, request.content
         ),
-    }).expect("Failed to record DocumentAdded");
+    }).map_err(|e| WorkBindrError::MorkWriteFailed(e))?;
 
+    // ── Generate embedding ────────────────────
     let embedding = match embeddings::get_embedding(
         &request.content, "search_document"
     ).await {
         Ok(emb) => emb,
-        Err(e) => { println!("  ⚠️ Embedding failed: {}", e); vec![] }
+        Err(e) => {
+            state.logger.warn(
+                "EMBEDDING",
+                &format!("Doc embedding failed: {}", e)
+            );
+            vec![] // save without embedding — still works, just no RAG
+        }
     };
 
-    state.storage.doc_store.add_document(StoredDocument {
-        doc_id: doc_id.clone(),
-        title: request.title.clone(),
-        content: request.content.clone(),
-        embedding,
-        department: department.clone(),
-        uploaded_by: employee.emp_id.clone(),
-    }).expect("Failed to save document");
+    // ── Save document ─────────────────────────
+    state.storage.doc_store
+        .add_document(storage::StoredDocument {
+            doc_id:      doc_id.clone(),
+            title:       request.title.clone(),
+            content:     request.content.clone(),
+            embedding,
+            department:  department.clone(),
+            uploaded_by: employee.emp_id.clone(),
+        })
+        .map_err(|e| WorkBindrError::DocumentSaveFailed(e))?;
 
-    // Notify all employees in the same department
+    // ── Log and notify ────────────────────────
+    state.logger.log_document_uploaded(
+        &employee.emp_id,
+        &doc_id,
+        &department
+    );
+
     let dept_employees = state.registry.get_by_department(&department);
     for dept_emp in dept_employees {
-        // Don't notify the uploader themselves
         if dept_emp.emp_id != employee.emp_id {
             state.notification_store.create(
                 dept_emp.emp_id.clone(),
                 NotificationType::DocumentAdded,
                 format!("New document in {}", department),
-                format!(
-                    "{} added a new document: '{}'",
-                    employee.name,
-                    request.title
-                ),
+                format!("{} added: '{}'", employee.name, request.title),
                 doc_id.clone(),
             ).ok();
         }
     }
-    println!("  🔔 Department notified about new document");
 
-    Json(AddDocumentResponse {
+    Ok(Json(AddDocumentResponse {
         doc_id: doc_id.clone(),
         department: department.clone(),
         message: format!(
             "✅ '{}' saved to {} department! doc_id: {}",
             request.title, department, doc_id
         ),
-
-        
-    })
-
-    
+    }))
 }
 
 // ─────────────────────────────────────────────
@@ -1716,6 +1768,7 @@ fn rocket() -> _ {
         notification_store: NotificationStore::new("workbinder_notifications.json"),
         chat_store:         ChatStore::new("workbinder_chat.json"),
         auth_store:         AuthStore::new("workbinder_auth.json", &jwt_secret),
+        logger:             Logger::new("workbinder_app.log"),
     };
 
     let cors = rocket_cors::CorsOptions {
@@ -1949,55 +2002,73 @@ async fn upload_file(
 fn login(
     request: Json<LoginRequest>,
     state:   &State<AppState>,
-) -> Json<LoginResponse> {
+) -> Result<Json<LoginResponse>, WorkBindrError> {
 
-    println!("\n🔐 Login attempt: {}", request.emp_id);
+    // ── Step 1: Validate inputs ───────────────
+    // Never trust what the user sends
+    // Check BEFORE touching any data
 
-    let employee = match state.registry.get_employee(&request.emp_id) {
-        None => {
-            return Json(LoginResponse {
-                success:    false,
-                token:      String::new(),
-                emp_id:     request.emp_id.clone(),
-                name:       String::new(),
-                department: String::new(),
-                role:       String::new(),
-                message:    format!("❌ Employee ID '{}' not found.", request.emp_id),
-            });
-        }
-        Some(e) => e,
-    };
+    validate_emp_id(&request.emp_id)?;
+    // The ? operator means:
+    // "if this returns Err, immediately return that error"
+    // Like a short-circuit — stops execution on first error
+    // Much cleaner than nested if/else
 
-    match state.auth_store.login(
-        &request.emp_id,
-        &request.password,
-        employee.department.to_str(),
-    ) {
-        Ok(token) => {
-            println!("  ✅ {} logged in successfully", employee.name);
-            Json(LoginResponse {
-                success:    true,
-                token,
-                emp_id:     employee.emp_id.clone(),
-                name:       employee.name.clone(),
-                department: employee.department.to_str().to_string(),
-                role:       employee.role.clone(),
-                message:    format!("Welcome back, {}!", employee.name),
-            })
-        }
-        Err(e) => {
-            println!("  ❌ Login failed: {}", e);
-            Json(LoginResponse {
-                success:    false,
-                token:      String::new(),
-                emp_id:     request.emp_id.clone(),
-                name:       String::new(),
-                department: String::new(),
-                role:       String::new(),
-                message:    format!("❌ {}", e),
-            })
-        }
-    }
+    require_field(&request.password, "password")?;
+
+    state.logger.info(
+        "AUTH",
+        &format!("Login attempt for emp_id: {}", request.emp_id)
+    );
+
+    // ── Step 2: Verify employee exists ────────
+    let employee = state.registry
+        .get_employee(&request.emp_id)
+        .ok_or_else(|| {
+            // ok_or_else converts Option<T> to Result<T, E>
+            // None becomes our specific error type
+            state.logger.log_login_failed(
+                &request.emp_id,
+                "employee not found"
+            );
+            WorkBindrError::EmployeeNotFound(request.emp_id.clone())
+        })?;
+
+    // ── Step 3: Attempt authentication ────────
+    let token = state.auth_store
+        .login(
+            &request.emp_id,
+            &request.password,
+            employee.department.to_str(),
+        )
+        .map_err(|e| {
+            // map_err converts String error to our WorkBindrError
+            state.logger.log_login_failed(&request.emp_id, &e);
+
+            // Determine specific error type from message
+            if e.contains("password") || e.contains("incorrect") {
+                WorkBindrError::InvalidPassword
+            } else {
+                WorkBindrError::AccessDenied(e)
+            }
+        })?;
+
+    // ── Step 4: Log success ───────────────────
+    state.logger.log_login_success(
+        &employee.emp_id,
+        employee.department.to_str()
+    );
+
+    // ── Step 5: Return success response ───────
+    Ok(Json(LoginResponse {
+        success:    true,
+        token,
+        emp_id:     employee.emp_id.clone(),
+        name:       employee.name.clone(),
+        department: employee.department.to_str().to_string(),
+        role:       employee.role.clone(),
+        message:    format!("Welcome back, {}!", employee.name),
+    }))
 }
 
 // ─────────────────────────────────────────────
