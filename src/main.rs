@@ -711,112 +711,96 @@ fn history(state: &State<AppState>) -> Json<HistoryResponse> {
 #[post("/tasks/create", format = "json", data = "<request>")]
 fn create_task(
     request: Json<CreateTaskRequest>,
-    state: &State<AppState>,
-) -> Json<UpdateTaskResponse> {
+    state:   &State<AppState>,
+) -> Result<Json<UpdateTaskResponse>, WorkBindrError> {
 
-    println!("\n📋 Create task from emp: {}", request.emp_id);
+    // ── Validate inputs ───────────────────────
+    validate_emp_id(&request.emp_id)?;
+    validate_emp_id(&request.assigned_to)?;
+    require_field(&request.title, "title")?;
+    validate_content_length(&request.title, 200, "title")?;
+    validate_content_length(&request.description, 2000, "description")?;
 
-    
+    // ── Validate priority ─────────────────────
+    let priority = Priority::from_str(&request.priority)
+        .ok_or_else(|| WorkBindrError::InvalidPriority(
+            request.priority.clone()
+        ))?;
 
-    // Verify creator exists
-    let creator = match state.registry.get_employee(&request.emp_id) {
-        Some(emp) => emp. clone(),
-        None => {
-            return Json(UpdateTaskResponse {
-                success: false,
-                message: format!("❌ Employee '{}' not found.", request.emp_id),
-            });
-        }
-    };
+    // ── Verify creator ────────────────────────
+    let creator = state.registry
+        .get_employee(&request.emp_id)
+        .ok_or_else(|| WorkBindrError::EmployeeNotFound(
+            request.emp_id.clone()
+        ))?;
 
-    // Verify assignee exists
-    let assignee = match state.registry.get_employee(&request.assigned_to) {
-        Some(emp) => emp.clone(),
-        None => {
-            return Json(UpdateTaskResponse {
-                success: false,
-                message: format!(
-                    "❌ Assignee '{}' not found.",
-                    request.assigned_to
-                ),
-            });
-        }
-    };
-
-    // Parse priority
-    let priority = match Priority::from_str(&request.priority) {
-        Some(p) => p,
-        None => {
-            return Json(UpdateTaskResponse {
-                success: false,
-                message: "❌ Invalid priority. Use: Low, Medium, High, Urgent".to_string(),
-            });
-        }
-    };
+    // ── Verify assignee ───────────────────────
+    let assignee = state.registry
+        .get_employee(&request.assigned_to)
+        .ok_or_else(|| WorkBindrError::EmployeeNotFound(
+            request.assigned_to.clone()
+        ))?;
 
     let task_id = generate_task_id();
-    let now = get_timestamp();
+    let now     = get_timestamp();
 
-    // Build the task
     let task = Task {
-        task_id: task_id.clone(),
-        title: request.title.clone(),
+        task_id:     task_id.clone(),
+        title:       request.title.clone(),
         description: request.description.clone(),
-        priority: priority.clone(),
-        status: TaskStatus::Todo,  // always starts as Todo
-        created_by: creator.emp_id.clone(),
+        priority:    priority.clone(),
+        status:      TaskStatus::Todo,
+        created_by:  creator.emp_id.clone(),
         assigned_to: assignee.emp_id.clone(),
-        department: creator.department.to_str().to_string(),
-        created_at: now,
-        updated_at: now,
+        department:  creator.department.to_str().to_string(),
+        created_at:  now,
+        updated_at:  now,
     };
 
-    // Save to TaskStore
-    state.task_store.add_task(task)
-        .expect("Failed to save task");
+    // ── Save task ─────────────────────────────
+    state.task_store
+        .add_task(task)
+        .map_err(|e| WorkBindrError::TaskSaveFailed(e))?;
 
-    // Record in MORK permanently
+    // ── Record in MORK ────────────────────────
     state.storage.record_event(Event::TaskCreated {
-        task_id: task_id.clone(),
-        title: request.title.clone(),
+        task_id:     task_id.clone(),
+        title:       request.title.clone(),
         assigned_to: assignee.name.clone(),
-        priority: priority.to_str().to_string(),
-        department: creator.department.to_str().to_string(),
-    }).expect("Failed to record TaskCreated");
+        priority:    priority.to_str().to_string(),
+        department:  creator.department.to_str().to_string(),
+    }).map_err(|e| WorkBindrError::MorkWriteFailed(e))?;
 
-    println!(
-        "  ✅ Task created: {} → assigned to {}",
-        request.title, assignee.name
+    // ── Log it ────────────────────────────────
+    state.logger.log_task_created(
+        &creator.emp_id,
+        &assignee.emp_id,
+        &task_id,
+        priority.to_str()
     );
 
-    // Send notification to the assignee
+    // ── Notify assignee ───────────────────────
     state.notification_store.create(
         assignee.emp_id.clone(),
         NotificationType::TaskAssigned,
-        format!("New task assigned to you"),
+        "New task assigned to you".to_string(),
         format!(
-            "{} assigned you a task: '{}' — Priority: {}",
-            creator.name,
-            request.title,
-            priority.to_str()
+            "{} assigned you: '{}' — Priority: {}",
+            creator.name, request.title, priority.to_str()
         ),
         task_id.clone(),
-    ).ok(); // .ok() means ignore error if notification fails
+    ).ok();
 
-    println!("  🔔 Notification sent to {}", assignee.name);
-
-    Json(UpdateTaskResponse {
+    Ok(Json(UpdateTaskResponse {
         success: true,
         message: format!(
-            "✅ Task '{}' created! {} priority. \
-            Assigned to {} ({}). task_id: {}",
+            "✅ Task '{}' created! {} priority. Assigned to {}. task_id: {}",
             request.title,
             priority.to_str(),
             assignee.name,
-            assignee.role,
             task_id
         ),
-    })
+    }))
 }
 
 
@@ -826,48 +810,38 @@ fn create_task(
 #[post("/tasks/update", format = "json", data = "<request>")]
 fn update_task(
     request: Json<UpdateTaskRequest>,
-    state: &State<AppState>,
-) -> Json<UpdateTaskResponse> {
+    state:   &State<AppState>,
+) -> Result<Json<UpdateTaskResponse>, WorkBindrError> {
 
-    println!("\n🔄 Update task: {} by emp: {}", request.task_id, request.emp_id);
+    // ── Validate inputs ───────────────────────
+    validate_emp_id(&request.emp_id)?;
+    require_field(&request.task_id, "task_id")?;
 
-    // Verify employee
-    match state.registry.get_employee(&request.emp_id) {
-        None => {
-            return Json(UpdateTaskResponse {
-                success: false,
-                message: format!("❌ Employee '{}' not found.", request.emp_id),
-            });
-        }
-        Some(emp) => println!("  Employee: {}", emp.name),
-    }
+    // ── Validate new status ───────────────────
+    let new_status = TaskStatus::from_str(&request.new_status)
+        .ok_or_else(|| WorkBindrError::InvalidStatus(
+            request.new_status.clone()
+        ))?;
 
-    // Get old status before updating
-    let old_status = match state.task_store.get_task(&request.task_id) {
-        Some(task) => task.status.to_str().to_string(),
-        None => {
-            return Json(UpdateTaskResponse {
-                success: false,
-                message: format!("❌ Task '{}' not found.", request.task_id),
-            });
-        }
-    };
+    // ── Verify employee ───────────────────────
+    let employee = state.registry
+        .get_employee(&request.emp_id)
+        .ok_or_else(|| WorkBindrError::EmployeeNotFound(
+            request.emp_id.clone()
+        ))?;
 
-    // Parse new status
-    let new_status = match TaskStatus::from_str(&request.new_status) {
-        Some(s) => s,
-        None => {
-            return Json(UpdateTaskResponse {
-                success: false,
-                message: "❌ Invalid status. Use: Todo, InProgress, Done".to_string(),
-            });
-        }
-    };
+    // ── Get the task ──────────────────────────
+    let task = state.task_store
+        .get_task(&request.task_id)
+        .ok_or_else(|| WorkBindrError::TaskNotFound(
+            request.task_id.clone()
+        ))?;
 
+    let old_status     = task.status.to_str().to_string();
     let new_status_str = new_status.to_str().to_string();
-    let now = get_timestamp();
+    let now            = get_timestamp();
 
-    // Update the task
+    // ── Update status ─────────────────────────
     let updated = state.task_store.update_status(
         &request.task_id,
         new_status,
@@ -876,52 +850,54 @@ fn update_task(
     );
 
     if !updated {
-        return Json(UpdateTaskResponse {
-            success: false,
-            message: "❌ Access denied. Only the assigned employee can update this task.".to_string(),
-        });
+        state.logger.log_access_denied(
+            &request.emp_id,
+            &format!("task:{}", request.task_id),
+            "not task assignee"
+        );
+        return Err(WorkBindrError::NotTaskAssignee);
     }
 
-    // Record in MORK
+    // ── Record in MORK ────────────────────────
     state.storage.record_event(Event::TaskUpdated {
-        task_id: request.task_id.clone(),
-        old_status: old_status.clone(),
-        new_status: new_status_str.clone(),
-        updated_by: request.emp_id.clone(),
-    }).expect("Failed to record TaskUpdated");
+        task_id:     request.task_id.clone(),
+        old_status:  old_status.clone(),
+        new_status:  new_status_str.clone(),
+        updated_by:  request.emp_id.clone(),
+    }).map_err(|e| WorkBindrError::MorkWriteFailed(e))?;
 
-    println!("  ✅ Task updated: {} → {}", old_status, new_status_str);
+    state.logger.audit(
+        "TASK",
+        "Task status updated",
+        &format!(
+            "task_id={} {} → {} by emp={}",
+            request.task_id, old_status, new_status_str, request.emp_id
+        )
+    );
 
-    // If task is marked Done, notify the creator
+    // ── Notify creator if done ────────────────
     if new_status_str == "Done" {
-        if let Some(task) = state.task_store.get_task(&request.task_id) {
-            if let Some(creator) = state.registry.get_employee(&task.created_by) {
-                if let Some(updater) = state.registry.get_employee(&request.emp_id) {
-                    state.notification_store.create(
-                        creator.emp_id.clone(),
-                        NotificationType::TaskCompleted,
-                        format!("Task completed!"),
-                        format!(
-                            "{} completed the task: '{}'",
-                            updater.name,
-                            task.title
-                        ),
-                        request.task_id.clone(),
-                    ).ok();
-                    println!("  🔔 Completion notification sent to {}", creator.name);
-                }
-            }
+        if let Some(creator) = state.registry.get_employee(&task.created_by) {
+            state.notification_store.create(
+                creator.emp_id.clone(),
+                NotificationType::TaskCompleted,
+                "Task completed!".to_string(),
+                format!(
+                    "{} completed: '{}'",
+                    employee.name, task.title
+                ),
+                request.task_id.clone(),
+            ).ok();
         }
     }
 
-    Json(UpdateTaskResponse {
+    Ok(Json(UpdateTaskResponse {
         success: true,
         message: format!(
-            "✅ Task updated! {} → {}",
-            old_status,
-            new_status_str
+            "✅ Task updated: {} → {}",
+            old_status, new_status_str
         ),
-    })
+    }))
 }
 
 // ── Admin Shapes ─────────────────────────────
@@ -1056,101 +1032,94 @@ fn get_all_tasks(state: &State<AppState>) -> Json<TaskListResponse> {
 #[post("/admin/add_employee", format = "json", data = "<request>")]
 fn add_employee(
     request: Json<AddEmployeeRequest>,
-    state: &State<AppState>,
-) -> Json<AddEmployeeResponse> {
+    state:   &State<AppState>,
+) -> Result<Json<AddEmployeeResponse>, WorkBindrError> {
 
-    println!("\n👤 Add employee request from: {}", request.admin_emp_id);
+    // ── Validate inputs ───────────────────────
+    validate_emp_id(&request.admin_emp_id)?;
+    validate_emp_id(&request.emp_id)?;
+    require_field(&request.name, "name")?;
+    require_field(&request.role, "role")?;
+    validate_content_length(&request.name, 100, "name")?;
+    validate_content_length(&request.role, 100, "role")?;
 
-    // Only CEO can add employees
-    match state.registry.get_employee(&request.admin_emp_id) {
-        None => {
-            return Json(AddEmployeeResponse {
-                success: false,
-                message: "❌ Admin not found.".to_string(),
-            });
-        }
-        Some(admin) => {
-            if admin.department.to_str() != "CEO" {
-                return Json(AddEmployeeResponse {
-                    success: false,
-                    message: "❌ Access Denied. Only CEO can add employees.".to_string(),
-                });
-            }
-        }
+    // ── Verify admin is CEO ───────────────────
+    let admin = state.registry
+        .get_employee(&request.admin_emp_id)
+        .ok_or_else(|| WorkBindrError::EmployeeNotFound(
+            request.admin_emp_id.clone()
+        ))?;
+
+    if admin.department.to_str() != "CEO" {
+        state.logger.log_access_denied(
+            &request.admin_emp_id,
+            "admin/add_employee",
+            "not CEO"
+        );
+        return Err(WorkBindrError::AccessDenied(
+            "Only CEO can add employees".to_string()
+        ));
     }
 
-    // Parse department
-    let department = match employees::Department::from_str(&request.department) {
-        Some(d) => d,
-        None => {
-            return Json(AddEmployeeResponse {
-                success: false,
-                message: format!(
-                    "❌ Invalid department '{}'. Use: HR, Finance, Legal, Engineering, CEO",
-                    request.department
-                ),
-            });
-        }
-    };
+    // ── Validate department ───────────────────
+    let department = employees::Department::from_str(&request.department)
+        .ok_or_else(|| WorkBindrError::InvalidDepartment(
+            request.department.clone()
+        ))?;
 
     let now = get_timestamp();
 
-    // Add the employee
-    match state.registry.add_employee(
-        request.emp_id.clone(),
-        request.name.clone(),
-        department.clone(),
-        request.role.clone(),
-        now,
-    ) {
-        Ok(_) => {
-            println!(
-                "  ✅ New employee added: {} ({}) - {}",
-                request.name,
-                request.emp_id,
-                department.to_str()
-            );
+    // ── Add employee ──────────────────────────
+    state.registry
+        .add_employee(
+            request.emp_id.clone(),
+            request.name.clone(),
+            department.clone(),
+            request.role.clone(),
+            now,
+        )
+        .map_err(|e| {
+            if e.contains("already exists") {
+                WorkBindrError::DuplicateEmployee(request.emp_id.clone())
+            } else {
+                WorkBindrError::DocumentSaveFailed(e)
+            }
+        })?;
 
-            // Record in MORK
-            state.storage.record_event(Event::UserInput {
-                query_id: generate_id(),
-                query_text: format!(
-                    "[ADMIN] New employee added: {} ({}) dept: {}",
-                    request.name,
-                    request.emp_id,
-                    department.to_str()
-                ),
-            }).ok();
-            // Notify CEO about new employee
-            state.notification_store.create(
-                request.admin_emp_id.clone(),
-                NotificationType::NewEmployee,
-                format!("New employee added"),
-                format!(
-                    "Successfully added {} ({}) to {} department",
-                    request.name,
-                    request.emp_id,
-                    request.department
-                ),
-                request.emp_id.clone(),
-            ).ok();
-            Json(AddEmployeeResponse {
-                success: true,
-                message: format!(
-                    "✅ Employee '{}' added successfully! \
-                    ID: {} | Department: {} | Role: {}",
-                    request.name,
-                    request.emp_id,
-                    department.to_str(),
-                    request.role
-                ),
-            })
-        }
-        Err(e) => Json(AddEmployeeResponse {
-            success: false,
-            message: format!("❌ Failed to add employee: {}", e),
-        }),
-    }
+    // ── Log it ────────────────────────────────
+    state.logger.audit(
+        "ADMIN",
+        "New employee added",
+        &format!(
+            "by={} new_emp={} name={} dept={}",
+            request.admin_emp_id,
+            request.emp_id,
+            request.name,
+            department.to_str()
+        )
+    );
+
+    // ── Record in MORK ────────────────────────
+    state.storage.record_event(Event::UserInput {
+        query_id:   generate_id(),
+        query_text: format!(
+            "[ADMIN] New employee: {} ({}) dept: {}",
+            request.name,
+            request.emp_id,
+            department.to_str()
+        ),
+    }).ok();
+
+    Ok(Json(AddEmployeeResponse {
+        success: true,
+        message: format!(
+            "✅ Employee '{}' added! ID: {} | Dept: {} | Role: {}",
+            request.name,
+            request.emp_id,
+            department.to_str(),
+            request.role
+        ),
+    }))
 }
 
 // ── Get All Employees ────────────────────────
@@ -1216,48 +1185,52 @@ fn get_stats(state: &State<AppState>) -> Json<PlatformStatsResponse> {
 #[post("/admin/deactivate", format = "json", data = "<request>")]
 fn deactivate_employee(
     request: Json<DeactivateRequest>,
-    state: &State<AppState>,
-) -> Json<AddEmployeeResponse> {
+    state:   &State<AppState>,
+) -> Result<Json<AddEmployeeResponse>, WorkBindrError> {
 
-    // Only CEO can deactivate
-    match state.registry.get_employee(&request.admin_emp_id) {
-        None => {
-            return Json(AddEmployeeResponse {
-                success: false,
-                message: "❌ Admin not found.".to_string(),
-            });
-        }
-        Some(admin) => {
-            if admin.department.to_str() != "CEO" {
-                return Json(AddEmployeeResponse {
-                    success: false,
-                    message: "❌ Only CEO can deactivate employees.".to_string(),
-                });
-            }
-        }
+    // ── Validate inputs ───────────────────────
+    validate_emp_id(&request.admin_emp_id)?;
+    validate_emp_id(&request.emp_id)?;
+
+    // ── Verify admin is CEO ───────────────────
+    let admin = state.registry
+        .get_employee(&request.admin_emp_id)
+        .ok_or_else(|| WorkBindrError::EmployeeNotFound(
+            request.admin_emp_id.clone()
+        ))?;
+
+    if admin.department.to_str() != "CEO" {
+        return Err(WorkBindrError::AccessDenied(
+            "Only CEO can deactivate employees".to_string()
+        ));
     }
 
-    // Can't deactivate yourself
+    // ── Prevent self deactivation ─────────────
     if request.emp_id == request.admin_emp_id {
-        return Json(AddEmployeeResponse {
-            success: false,
-            message: "❌ Cannot deactivate yourself.".to_string(),
-        });
+        return Err(WorkBindrError::SelfDeactivation);
     }
 
-    match state.registry.deactivate_employee(&request.emp_id) {
-        Ok(_) => Json(AddEmployeeResponse {
-            success: true,
-            message: format!(
-                "✅ Employee {} deactivated. They can no longer access the platform.",
-                request.emp_id
-            ),
-        }),
-        Err(e) => Json(AddEmployeeResponse {
-            success: false,
-            message: format!("❌ {}", e),
-        }),
-    }
+    // ── Deactivate ────────────────────────────
+    state.registry
+        .deactivate_employee(&request.emp_id)
+        .map_err(|e| WorkBindrError::DocumentSaveFailed(e))?;
+
+    state.logger.audit(
+        "ADMIN",
+        "Employee deactivated",
+        &format!(
+            "by={} target={}",
+            request.admin_emp_id, request.emp_id
+        )
+    );
+
+    Ok(Json(AddEmployeeResponse {
+        success: true,
+        message: format!(
+            "✅ Employee {} deactivated successfully.",
+            request.emp_id
+        ),
+    }))
 }
 // ─────────────────────────────────────────────
 // NOTIFICATION ENDPOINTS
@@ -1407,112 +1380,88 @@ fn get_dept_members(
 fn send_message(
     request: Json<SendMessageRequest>,
     state:   &State<AppState>,
-) -> Json<UpdateTaskResponse> {
+) -> Result<Json<UpdateTaskResponse>, WorkBindrError> {
 
-    println!("\n💬 Message from {} to {}",
-        request.from_emp_id, request.to_emp_id);
+    // ── Validate inputs ───────────────────────
+    validate_emp_id(&request.from_emp_id)?;
+    validate_emp_id(&request.to_emp_id)?;
+    require_field(&request.content, "content")?;
+    validate_content_length(&request.content, 5000, "message")?;
 
-    // Verify sender exists
-    let sender = match state.registry.get_employee(&request.from_emp_id) {
-        None => {
-            return Json(UpdateTaskResponse {
-                success: false,
-                message: format!(
-                    "❌ Sender '{}' not found.",
-                    request.from_emp_id
-                ),
-            });
-        }
-        Some(e) => e,
-    };
+    // ── Verify sender ─────────────────────────
+    let sender = state.registry
+        .get_employee(&request.from_emp_id)
+        .ok_or_else(|| WorkBindrError::EmployeeNotFound(
+            request.from_emp_id.clone()
+        ))?;
 
-    // Verify receiver exists
-    let receiver = match state.registry.get_employee(&request.to_emp_id) {
-        None => {
-            return Json(UpdateTaskResponse {
-                success: false,
-                message: format!(
-                    "❌ Receiver '{}' not found.",
-                    request.to_emp_id
-                ),
-            });
-        }
-        Some(e) => e,
-    };
+    // ── Verify receiver ───────────────────────
+    let receiver = state.registry
+        .get_employee(&request.to_emp_id)
+        .ok_or_else(|| WorkBindrError::EmployeeNotFound(
+            request.to_emp_id.clone()
+        ))?;
 
-    // Department check — same department only
-    // CEO can message anyone
+    // ── Department check ──────────────────────
     if sender.department.to_str() != "CEO"
         && sender.department.to_str() != receiver.department.to_str()
     {
-        return Json(UpdateTaskResponse {
-            success: false,
-            message: format!(
-                "❌ You can only message employees in your \
-                department ({}). {} is in {}.",
-                sender.department.to_str(),
-                receiver.name,
-                receiver.department.to_str()
-            ),
-        });
-    }
-
-    // Content validation
-    if request.content.trim().is_empty() {
-        return Json(UpdateTaskResponse {
-            success: false,
-            message: "❌ Message cannot be empty.".to_string(),
-        });
+        state.logger.log_access_denied(
+            &sender.emp_id,
+            &format!("message:{}", receiver.emp_id),
+            "cross department messaging not allowed"
+        );
+        return Err(WorkBindrError::CrossDepartmentMessage);
     }
 
     let department = sender.department.to_str().to_string();
 
-    // Save the message
-    let message = match state.chat_store.send_message(
-        request.from_emp_id.clone(),
-        request.to_emp_id.clone(),
-        request.content.trim().to_string(),
-        department.clone(),
-    ) {
-        Ok(msg) => msg,
-        Err(e) => {
-            return Json(UpdateTaskResponse {
-                success: false,
-                message: format!("❌ Failed to save message: {}", e),
-            });
-        }
-    };
+    // ── Send message ──────────────────────────
+    let message = state.chat_store
+        .send_message(
+            request.from_emp_id.clone(),
+            request.to_emp_id.clone(),
+            request.content.trim().to_string(),
+            department.clone(),
+        )
+        .map_err(|e| WorkBindrError::DocumentSaveFailed(e))?;
 
-    // Record in MORK permanently
+    // ── Record in MORK ────────────────────────
     state.storage.record_event(Event::MessageSent {
         message_id:  message.message_id.clone(),
         from_emp_id: sender.emp_id.clone(),
         to_emp_id:   receiver.emp_id.clone(),
         department:  department.clone(),
-    }).expect("Failed to record MessageSent");
+    }).map_err(|e| WorkBindrError::MorkWriteFailed(e))?;
 
-    // Send notification to receiver
+    state.logger.info_with_data(
+        "CHAT",
+        "Message sent",
+        &format!(
+            "from={} to={} dept={}",
+            sender.emp_id, receiver.emp_id, department
+        )
+    );
+
+    // ── Notify receiver ───────────────────────
+    let preview = if request.content.len() > 50 {
+        format!("{}...", &request.content[..50])
+    } else {
+        request.content.clone()
+    };
+
     state.notification_store.create(
         receiver.emp_id.clone(),
-        NotificationType::TaskAssigned, // reusing for now
+        NotificationType::TaskAssigned,
         format!("New message from {}", sender.name),
-        format!(
-            "{}: {}",
-            sender.name,
-            &request.content[..request.content.len().min(50)]
-        ),
+        format!("{}: {}", sender.name, preview),
         message.message_id.clone(),
     ).ok();
 
-    println!(
-        "  ✅ Message sent: {} → {}",
-        sender.name, receiver.name
-    );
-
-    Json(UpdateTaskResponse {
+    Ok(Json(UpdateTaskResponse {
         success: true,
         message: "✅ Message sent!".to_string(),
-    })
+    }))
 }
 
 // ── Get Conversation ──────────────────────────
